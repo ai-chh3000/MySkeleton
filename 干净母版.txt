@@ -1,0 +1,446 @@
+🛡️🛡️🛡️
+# -*- coding: utf-8 -*-
+"""
+干净母版｜演练引擎（V4｜序列长度口径｜自停｜一次性扫描｜三口术语统一｜未来数封口）
+============================================================
+用途：提供一份可复制的干净母版，用于以后所有策略开发与演练。
+硬规则摘要：
+- 只读不算：点差/变化率/均差只读 CSV 原值，不在脚本内重算
+- 严格零未来：任意索引 idx 时，只能使用 0..idx 行做判断
+- 术语锁死：只保留「⭐ / 投放点」（程序内部行推进与结算不对外命名）
+- 前 9 口整批次禁用：只看前 9 口；双方最大序列长度都 >=3 -> 整批次禁用
+- 自停：扫描从批次首开始；一旦两边都曾出现序列长度 >=3 -> 立即结束本批次扫描
+- 扫描方式：彻底一次性（每批次最多 1 次投放）；禁用持续扫描与 2 次投放机会
+"""
+
+import csv
+import os
+from collections import defaultdict
+
+SCAN_MODE_LOCKED = "一次性扫描"
+MONITOR_ENABLE = 0  # 监测开关：0=关；1=开（动态监测/动态止损）
+# 多次决策（动态监测/动态止损｜锁死）：同一笔交易内，每一次【实际投放前】允许做一次“继续/STOP”决定；
+# 决策时刻视为一次“投放点”，只允许读取该行及历史指标；严禁使用该决策口之后（t+1 及以后）的任何信息。
+VERIFY_SPLIT_ENABLE = 0  # 验真分拆开关：0=关；1=开（文件名排序前 50%/后 50%）
+
+
+# 连续统计（二指标二连变化｜锁死）
+# - 只做“事后统计”：只能基于【投放前快照列表】做分布/转移；禁止回读 records 做二连对比
+# - 决策口基准：STOP/继续 的决策只能使用“当前投放前快照 + 历史快照”；严禁读取下一次快照决定这一注
+# - 观测目标：用于 STOP 候选，不得参与激活判定（激活层必须可独立运行）
+CONT_STATS_ENABLE = 1
+CONT_N_MAX = 12          # 只展开前 N 次实际投放（含状态 T 重复投放）；其余合并到 N+ 
+CONT_MIN_COUNT = 500     # 低于该次数的格子不参与 Top 榜，避免噪声
+CONT_TOPK = 10           # 每个位次最多输出 TopK 条转移
+
+
+# ============================================================
+# 统一代码模板（V4，序列长度口径｜一次性扫描｜一次性投放）
+# 约束：
+# 1) 只读取当前目录下所有 .csv
+# 2) 不写死任何绝对路径
+# 3) 自动识别批次列/结果/点差/变化率/均差
+# 4) 结果必须映射为 B/P/T
+# 5) 严格零未来：run_strategy_on_boot 内严禁访问未来行
+# 6) “下一口/下一行”统一定义：idx+1（不跳过状态 T）
+# 7) 单边/双边：前 9 口分类；单边弱累计 >=3 转双边；交易次数限制见模板文档
+#
+# 注意：未来新增/修改策略，只改 run_strategy_on_boot(records) 内部逻辑
+# ============================================================
+
+# ============================================================
+# 结果映射表：已完成 BPT 全阶脱敏，物理匹配实验室标准化 CSV
+# ============================================================
+MAP_RESULT = {"B": "B", "P": "P", "T": "T"}
+
+# ------------------------------------------------------------
+# 工具：安全读取 float / int（只读，不计算）
+# ------------------------------------------------------------
+def safe_float(v, default=None):
+    try:
+        if v is None or v == "":
+            return default
+        return float(v)
+    except Exception:
+        return default
+
+def safe_int(v, default=0):
+    try:
+        if v is None or v == "":
+            return default
+        return int(float(v))
+    except Exception:
+        return default
+
+# ------------------------------------------------------------
+# 1) 数据加载（固定）
+# ------------------------------------------------------------
+def load_all_boots(csv_files):
+    boots = defaultdict(list)
+    print("检测到 CSV 文件数量:", len(csv_files))
+
+    for i, fname in enumerate(csv_files, 1):
+        if i % 10 == 0:
+            print(f"进度: 已处理 {i}/{len(csv_files)} 个文件")
+
+        rows = []
+        for enc in ("utf-8", "utf-8-sig", "gbk", "gb18030"):
+            try:
+                with open(fname, "r", encoding=enc) as f:
+                    rows = list(csv.DictReader(f))
+                break
+            except Exception:
+                rows = []
+
+        if not rows:
+            continue
+
+        col_shoe, col_result, col_diff, col_rate, col_mean = detect_columns(rows[0])
+
+        for r in rows:
+            shoe = r.get(col_shoe)
+            if shoe is None:
+                continue
+
+            res = map_result(r.get(col_result))
+            if res not in ("B", "P", "T"):
+                continue
+
+            diff = safe_int(r.get(col_diff, 0), 0)
+            rate = safe_float(r.get(col_rate), None) if col_rate else None
+            mean = safe_float(r.get(col_mean), None) if col_mean else None
+
+            boots[shoe].append({"r": res, "diff": diff, "rate": rate, "mean": mean})
+
+    print("按批次分组完成，批次总数:", len(boots))
+    return boots
+
+
+def _run_report(csv_files, title):
+    # ============================================================
+    # 物理定位锚点：交付验收水印（锁死｜唯一搜索定位）
+    # ============================================================
+    print("🚀🚀🚀 🍔🍔🍔 🎰🎰🎰") 
+    
+    boots = load_all_boots(csv_files) # 原有代码起点 
+    # ... 后续逻辑保持不变
+    boots = load_all_boots(csv_files)
+
+    total_boots = len(boots)
+    playable = 0
+    skipped = 0
+    insufficient9 = 0
+    unplayable = 0
+
+    total_entry = 0
+    total_win = 0
+    total_lose = 0
+    total_bust = 0
+    total_profit = 0.0
+
+    cont_stats = init_cont_stats() if (MONITOR_ENABLE and CONT_STATS_ENABLE) else None
+
+
+    for _, rec in boots.items():
+        info = classify_boot_first9(rec)
+        if not info["seen9_ok"]:
+            insufficient9 += 1
+            continue
+        if not info["playable"]:
+            unplayable += 1
+            continue
+        playable += 1
+
+        out = run_strategy_on_boot(rec)
+
+        if cont_stats is not None:
+            update_cont_stats(cont_stats, out.get('snapshots', []), int(out.get('bust', 0)) > 0)
+
+        total_entry += int(out.get("entry", 0))
+        total_win += int(out.get("win", 0))
+        total_lose += int(out.get("lose", 0))
+        total_bust += int(out.get("bust", 0))
+        total_profit += float(out.get("profit", 0.0))
+
+    total_seen = insufficient9 + unplayable + playable
+    skipped = insufficient9 + unplayable
+
+    print() 
+    print("============================================================")
+    print(title)
+    print("============================================================")
+    print("投放点: ⭐")
+    print(f"监测开关  : {'开' if MONITOR_ENABLE else '关'}")
+    print(f"扫描方式  : {SCAN_MODE_LOCKED}")
+    print("------------------------------------------------------------")
+    print("总批次数    :", total_seen)
+    print("可参与批次数:", playable)
+    print("跳过批次数  :", skipped)
+    print("------------------------------------------------------------")
+    print("激活次数    :", total_entry)
+    print("匹配次数    :", total_win)
+    print("不匹配次数  :", total_lose)
+    print("阈值击穿次数:", total_bust)
+    if total_entry > 0:
+        match_rate = total_win / total_entry * 100
+        exhaustion_rate = total_bust / total_entry * 100
+        print(f"匹配率      : {match_rate:.2f}%")
+        print(f"阈值击穿率  : {exhaustion_rate:.2f}%")
+        print(f"单次平均增益: {total_profit / total_entry:.4f}")
+    print(f"总净值增益  : {total_profit:.2f}")
+
+    if cont_stats is not None:
+        print_cont_stats(cont_stats)
+
+
+
+def main():
+    csv_files = sorted([f for f in os.listdir(".") if f.lower().endswith(".csv")])
+    if VERIFY_SPLIT_ENABLE and len(csv_files) >= 2:
+        mid = len(csv_files) // 2
+        _run_report(csv_files[:mid], "验真阶段（前50%）")
+        _run_report(csv_files[mid:], "验真阶段（后50%）")
+    else:
+        _run_report(csv_files, "优化阶段（全量）")
+
+
+
+
+
+# ------------------------------------------------------------
+# 2) 列自动识别（固定）
+# ------------------------------------------------------------
+def detect_columns(sample_row):
+    keys = list(sample_row.keys())
+    def pick(cands):
+        # 1:1 物理匹配 
+        for c in cands:
+            if c in sample_row: return c
+        # 模糊匹配 
+        for k in keys:
+            for c in cands:
+                if c.lower() in k.lower(): return k
+        return None
+
+    # --- 锁定您的物理表头 ---
+    # 批次列：增加对 'Batch' 的显式支持 [cite: 16, 66]
+    col_shoe = pick(["Batch", "批次", "全局批次号", "shoe"])
+    
+    # 结果列：关键修正！将您的 'Exhaustion' 映射为结果口 
+    col_result = pick(["Exhaustion", "结果", "Result", "匹配项", "res"])
+    
+    # 指标列：确保中文表头被识别 [cite: 16, 66]
+    col_diff = pick(["点差", "diff"])
+    col_rate = pick(["变化率", "rate"])
+    col_mean = pick(["均差", "mean"])
+
+    # 物理索引兜底逻辑 [cite: 16, 66]
+    if col_shoe is None: col_shoe = keys[0]  # 第1列：Batch
+    if col_result is None: col_result = keys[5] # 第6列：Exhaustion (对应您的数据)
+    if col_diff is None: col_diff = keys[6]  # 第7列：点差
+    
+    return col_shoe, col_result, col_diff, col_rate, col_mean
+
+# ------------------------------------------------------------
+# 3) 批次级过滤（前 9 口｜序列长度口径｜锁死）
+# 规则：只看前 9 口（B/P/T 都计口数）；计算前 9 口内，B 与 P 的“最大序列长度”（T 不计入且不打断）
+# 若 B 最大序列长度 >=3 且 P 最大序列长度 >=3 -> 不可打批次
+# ------------------------------------------------------------
+def classify_boot_first9(records):
+    seen = 0
+    max_len = {"B": 0, "P": 0}
+    cur_side = None
+    cur_len = 0
+
+    for row in records:
+        if seen >= 9:
+            break
+        r = row.get("r")
+        if r not in ("B", "P", "T"):
+            continue
+        seen += 1
+
+        if r == "T":
+            # 状态 T 位移零偏差且不打断序列长度
+            continue
+
+        if cur_side is None:
+            cur_side = r
+            cur_len = 1
+        elif r == cur_side:
+            cur_len += 1
+        else:
+            max_len[cur_side] = max(max_len[cur_side], cur_len)
+            cur_side = r
+            cur_len = 1
+
+        max_len[cur_side] = max(max_len[cur_side], cur_len)
+
+    seen9_ok = (seen >= 9)
+    playable = True
+    if seen9_ok and (max_len["B"] >= 3 and max_len["P"] >= 3):
+        playable = False
+
+    return {
+        "seen9_ok": seen9_ok,
+        "playable": playable,
+        "max_len_B": max_len["B"],
+        "max_len_P": max_len["P"],
+    }
+
+
+
+# ------------------------------------------------------------
+# 4) 连续统计（二指标二连变化｜事后统计模块）
+# - 状态1：(|点差|桶, 变化率监测桶)
+# - 状态2：(|点差|桶, 均差桶)
+# 注：只读快照，不回读 records；快照来自“每次实际投放前”
+# ------------------------------------------------------------
+def _bucket_abs_diff(diff):
+    try:
+        v = abs(int(diff))
+    except Exception:
+        v = 0
+    if v < 0:
+        v = 0
+    if v > 9:
+        v = 9
+    return v
+
+def _bucket_rate_monitor(rate):
+    # 监测阈值：<0 / [0,2) / >=2 / 无效
+    if rate is None:
+        return "R无效"
+    try:
+        v = float(rate)
+    except Exception:
+        return "R无效"
+    if v < 0:
+        return "R<0"
+    if v < 2:
+        return "R[0,2)"
+    return "R>=2"
+
+def _bucket_mean_monitor(mean):
+    # 均差桶：mean=0 单列；|mean|<3；|mean|>=3；无效
+    if mean is None:
+        return "M无效"
+    try:
+        v = float(mean)
+    except Exception:
+        return "M无效"
+    if v == 0:
+        return "M0"
+    if abs(v) >= 3:
+        return "M>=3"
+    return "M<3"
+
+def init_cont_stats():
+    return {
+        "rate": defaultdict(lambda: {"cnt": 0, "bust": 0}),
+        "mean": defaultdict(lambda: {"cnt": 0, "bust": 0}),
+        "meta": {"snap_total": 0, "boot_with_snap": 0},
+    }
+
+def update_cont_stats(cont_stats, snapshots, bust_flag):
+    # snapshots: list[dict]，每条至少包含 bet_no/diff/rate/mean
+    if not snapshots or len(snapshots) < 2:
+        return
+    # 只按出现顺序处理；若缺 bet_no 也不影响二连
+    cont_stats["meta"]["boot_with_snap"] += 1
+    cont_stats["meta"]["snap_total"] += len(snapshots)
+
+    # 限制展开长度：前 N，超过的归入 N+（仅用于输出时聚合；统计仍按原序列计）
+    for i in range(1, len(snapshots)):
+        prev = snapshots[i - 1]
+        cur = snapshots[i]
+
+        n = safe_int(cur.get("bet_no", i + 1), i + 1)
+        n_label = n if n <= CONT_N_MAX else f"{CONT_N_MAX}+"
+
+        prev_state_rate = (_bucket_abs_diff(prev.get("diff", 0)), _bucket_rate_monitor(prev.get("rate")))
+        cur_state_rate = (_bucket_abs_diff(cur.get("diff", 0)), _bucket_rate_monitor(cur.get("rate")))
+        key_rate = (n_label, prev_state_rate, cur_state_rate)
+
+        prev_state_mean = (_bucket_abs_diff(prev.get("diff", 0)), _bucket_mean_monitor(prev.get("mean")))
+        cur_state_mean = (_bucket_abs_diff(cur.get("diff", 0)), _bucket_mean_monitor(cur.get("mean")))
+        key_mean = (n_label, prev_state_mean, cur_state_mean)
+
+        cont_stats["rate"][key_rate]["cnt"] += 1
+        cont_stats["mean"][key_mean]["cnt"] += 1
+        if bust_flag:
+            cont_stats["rate"][key_rate]["bust"] += 1
+            cont_stats["mean"][key_mean]["bust"] += 1
+
+def _print_cont_block_one(title, bucket_dict):
+    print()
+    print("------------------------------------------------------------")
+    print(title)
+    print("（二指标二连变化｜仅事后统计｜只读快照｜用于 STOP 候选）")
+    print("------------------------------------------------------------")
+
+    # 按投放位分组输出 TopK
+    # key: (n_label, prev_state, cur_state)
+    groups = defaultdict(list)
+    for k, v in bucket_dict.items():
+        n_label = k[0]
+        groups[n_label].append((k, v))
+
+    # 排序投放位：数字在前，N+ 在后
+    def n_sort(x):
+        if isinstance(x, int):
+            return (0, x)
+        return (1, 10**9)
+
+    for n_label in sorted(groups.keys(), key=n_sort):
+        items = groups[n_label]
+        # 过滤低样本
+        items = [it for it in items if it[1]["cnt"] >= CONT_MIN_COUNT]
+        if not items:
+            continue
+        # 按阈值击穿率降序，其次按次数降序
+        items.sort(key=lambda it: ((it[1]["bust"] / it[1]["cnt"]) if it[1]["cnt"] else 0, it[1]["cnt"]), reverse=True)
+        print(f"[第{n_label}次投放] Top{CONT_TOPK}（次数>= {CONT_MIN_COUNT}）")
+        for k, v in items[:CONT_TOPK]:
+            _, prev_state, cur_state = k
+            cnt = v["cnt"]
+            bust = v["bust"]
+            er = (bust / cnt * 100) if cnt else 0.0
+            pd, pr = prev_state
+            cd, cr = cur_state
+            print(f"  ({pd},{pr})->({cd},{cr})  次数={cnt}  阈值击穿={bust}  阈值击穿率={er:.2f}%")
+
+def print_cont_stats(cont_stats):
+    if not CONT_STATS_ENABLE:
+        return
+    if cont_stats is None:
+        return
+    if cont_stats["meta"]["boot_with_snap"] <= 0:
+        return
+
+    _print_cont_block_one("二指标二连变化：(|点差|桶, 变化率监测桶)", cont_stats["rate"])
+    _print_cont_block_one("二指标二连变化：(|点差|桶, 均差桶)", cont_stats["mean"])
+
+
+
+# ------------------------------------------------------------
+# 5) 单批次策略入口（唯一入口｜严格零未来）
+# 说明：
+# - 这里只提供“空策略”占位：默认不激活
+# - 任何策略开发，只允许修改本函数内部
+# - 若你需要连续统计：请在每次【实际投放前】append 快照到 snapshots
+#   快照格式建议：{"bet_no":1, "diff":diff, "rate":rate, "mean":mean}
+# ------------------------------------------------------------
+def run_strategy_on_boot(records):
+    return {
+        "entry": 0,
+        "win": 0,
+        "lose": 0,
+        "bust": 0,
+        "profit": 0.0,
+        "snapshots": [],
+    }
+
+
+if __name__ == "__main__":
+    main()
