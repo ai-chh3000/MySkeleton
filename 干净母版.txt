@@ -222,25 +222,23 @@ def detect_columns(sample_row):
                 if c.lower() in k.lower(): return k
         return None
 
-    # --- 锁定您的物理表头 ---
-    # 批次列：增加对 'Batch' 的显式支持 [cite: 16, 66]
-    col_shoe = pick(["Batch", "批次", "全局批次号", "shoe"])
+    # --- 锁定物理表头（核心修正） ---
+    # 批次列：支持 'Batch' [cite: 62]
+    col_shoe = pick(["Batch", "批次", "shoe"])
     
-    # 结果列：关键修正！将您的 'Exhaustion' 映射为结果口 
-    col_result = pick(["Exhaustion", "结果", "Result", "匹配项", "res"])
+    # 结果列：将您的 'Exhaustion' 映射为唯一结果源 [cite: 62]
+    col_result = pick(["Exhaustion", "结果", "Result", "r"])
     
-    # 指标列：确保中文表头被识别 [cite: 16, 66]
+    # 指标列：点差/变化率/均差 [cite: 62]
     col_diff = pick(["点差", "diff"])
     col_rate = pick(["变化率", "rate"])
     col_mean = pick(["均差", "mean"])
 
-    # 物理索引兜底逻辑 [cite: 16, 66]
-    if col_shoe is None: col_shoe = keys[0]  # 第1列：Batch
-    if col_result is None: col_result = keys[5] # 第6列：Exhaustion (对应您的数据)
-    if col_diff is None: col_diff = keys[6]  # 第7列：点差
+    # 物理索引兜底逻辑 [cite: 63]
+    if col_shoe is None: col_shoe = keys[0]
+    if col_result is None: col_result = keys[5] # 对应您 CSV 的第 6 列
     
     return col_shoe, col_result, col_diff, col_rate, col_mean
-
 # ------------------------------------------------------------
 # 3) 批次级过滤（前 9 口｜序列长度口径｜锁死）
 # 规则：只看前 9 口（B/P/T 都计口数）；计算前 9 口内，B 与 P 的“最大序列长度”（T 不计入且不打断）
@@ -432,14 +430,50 @@ def print_cont_stats(cont_stats):
 #   快照格式建议：{"bet_no":1, "diff":diff, "rate":rate, "mean":mean}
 # ------------------------------------------------------------
 def run_strategy_on_boot(records):
-    return {
-        "entry": 0,
-        "win": 0,
-        "lose": 0,
-        "bust": 0,
-        "profit": 0.0,
-        "snapshots": [],
-    }
+    # 1. 物理槽位初始化
+    snapshots = []
+    entry, win, lose, bust = 0, 0, 0, 0
+    profit = 0.0
+
+    for idx, r in enumerate(records):
+        # --- A层：结构激活 (DNA检测) ---
+        # 强制锁死：激活必须在辅轴长度 Lw = 1 的时刻
+        if not (current_w_len == 1 and dna_match):
+            continue
+
+        # --- B层：神谕审计 (Oracle Audit) ---
+        # 探测点：W1 处全量记录，不设物理过滤
+        is_oracle_pass = True 
+
+        if is_oracle_pass:
+            # --- C层：执行与 1248 动态归因 ---
+            entry += 1
+            units = [1, 2, 4, 8]
+            is_settled = False
+
+            for b_idx, u in enumerate(units):
+                # 物理步进：逐行读取结果，严禁切片 
+                curr_row = records[idx + b_idx]
+                
+                # 归因快照：记录当前层级，锁定 idx 为 W1 行号
+                snap = {'bet_no': b_idx + 1, 'idx': idx, 'mean': curr_row['mean']}
+                snapshots.append(snap)
+
+                # 动态结算：发现匹配立即 Match 并物理断流
+                if curr_row['r'] == target:
+                    win += 1
+                    profit += (u * 0.95)
+                    is_settled = True
+                    break 
+
+            if not is_settled:
+                lose += 1
+                bust += 1 # 1248 全输即为阈值击穿
+                profit -= sum(units)
+            
+            break # 一次性扫描锁死：每批次仅 1 次执行
+            
+    return {"entry": entry, "win": win, "lose": lose, "bust": bust, "profit": profit, "snapshots": snapshots}    
 
 
 if __name__ == "__main__":

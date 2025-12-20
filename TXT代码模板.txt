@@ -316,7 +316,9 @@ def run_strategy_on_boot(records):
     for idx, r in enumerate(records):
         # --- A层：结构激活 (DNA检测) ---
         # [此处由策略确定结构，例如：主轴 >= 3]
-        is_structure_active = False 
+        # --- A层：结构激活 (DNA检测) ---
+        # 强制锁死：激活必须满足“辅轴长度 == 1” (W1) 且符合 DNA 结构 
+        is_structure_active = (current_w_len == 1 and other_dna_conditions)
 
         if is_structure_active:
             # --- B层：神谕审计 (Oracle Audit) ---
@@ -328,37 +330,41 @@ def run_strategy_on_boot(records):
                 # 审计不通过：放弃本次执行，程序必须继续向后扫描
                 continue
 
-            # --- C层：执行与负向阻断 (Negative Interception) ---
+# --- C层：执行与负向阻断 (Negative Interception) ---
             entry += 1
-            units = [1, 2, 4, 8] # 示例序列
-            
+            units = [1, 2, 4, 8] 
+            is_settled = False 
+
             for b_idx, u in enumerate(units):
-                # 记录快照：必须在每次“实际投放前”执行
+                # 1. 物理步进：严禁使用 records[idx:idx+4] 切片 (隔绝未来函数)
+                # 每一个 b_idx 对应时间轴上的一次真实前行
+                current_exec_row = records[idx + b_idx] 
+                
+                # 2. 物理快照：记录该层级的真实数据 [cite: 26, 27]
+                # 归因锁定：snapshots 的 idx 始终指向激活时刻的行号
                 snap = {
                     'bet_n': b_idx + 1, 
                     'idx': idx, 
-                    'diff': r['diff'], 
-                    'rate': r['rate'], 
-                    'mean': r['mean']
+                    'diff': current_exec_row['diff'], 
+                    'rate': current_exec_row['rate'], 
+                    'mean': current_exec_row['mean']
                 }
-                snapshots.append(snap)
+                snapshots.append(snap) # [cite: 30]
 
-                # 负向快照阻断判断 (决策口 STOP)
-                if b_idx > 0:
-                    # 获取“上一次有效投放前快照”进行趋势对比
-                    prev_snap = snapshots[-2]
-                    # [此处由策略判定是否满足阻断条件，如 Mean 有效转向]
-                    is_stop_triggered = False 
-                    
-                    if is_stop_triggered:
-                        break # 执行物理熔断，停止后续投放
+                # 3. 动态结算：逐行读取当前行的物理结果 [cite: 33, 34]
+                if current_exec_row['r'] == target_side: 
+                    match += 1
+                    profit += (u * 0.95) # 假设赔率
+                    is_settled = True
+                    break # 物理断流：一旦 Match 立即停止，不看未来结果
 
-                # 执行物理结算 (idx + 1 为结果)
-                # ... (结算逻辑由 Coder 实现)
+            # 4. 汇总判定：全序列未匹配
+            if not is_settled:
+                mismatch += 1
+                profit -= sum(units)
 
-            # 一靴一单元：执行完毕立即跳出 Batch 循环
+            # 5. 一靴一单元：执行完毕立即跳出 Batch 循环
             break
-
     return {
         "entry": entry,
         "match": match,
