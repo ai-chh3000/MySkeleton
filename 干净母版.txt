@@ -222,17 +222,12 @@ def detect_columns(sample_row):
                 if c.lower() in k.lower(): return k
         return None
 
-    # --- 锁定物理表头（核心修正） ---
-    # 批次列：支持 'Batch' [cite: 62]
-    col_shoe = pick(["Batch", "批次", "shoe"])
-    
-    # 结果列：将您的 'Exhaustion' 映射为唯一结果源 [cite: 62]
-    col_result = pick(["Exhaustion", "结果", "Result", "r"])
-    
-    # 指标列：点差/变化率/均差 [cite: 62]
-    col_diff = pick(["点差", "diff"])
-    col_rate = pick(["变化率", "rate"])
-    col_mean = pick(["均差", "mean"])
+# --- 锁定物理表头（以口径模板为唯一真源） ---
+col_shoe   = pick(["Batch", "批次", "全局批次号", "shoe", "靴号", "靴"])
+col_result = pick(["Exhaustion", "结果", "Result", "r", "匹配项", "res"])
+col_diff   = pick(["点差", "diff"])
+col_rate   = pick(["变化率", "rate"])
+col_mean   = pick(["均差", "mean"])
 
     # 物理索引兜底逻辑 [cite: 63]
     if col_shoe is None: col_shoe = keys[0]

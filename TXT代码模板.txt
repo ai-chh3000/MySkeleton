@@ -271,24 +271,12 @@ def detect_columns(sample_row):
                 if c.lower() in k.lower(): return k
         return None
 
-    # --- 锁定您的物理表头 ---
-    # 批次列：增加对 'Batch' 的显式支持 [cite: 16, 66]
-    col_shoe = pick(["Batch", "批次", "全局批次号", "shoe"])
-    
-    # 结果列：关键修正！将您的 'Exhaustion' 映射为结果口 
-    col_result = pick(["Exhaustion", "结果", "Result", "匹配项", "res"])
-    
-    # 指标列：确保中文表头被识别 [cite: 16, 66]
-    col_diff = pick(["点差", "diff"])
-    col_rate = pick(["变化率", "rate"])
-    col_mean = pick(["均差", "mean"])
-
-    # 物理索引兜底逻辑 [cite: 16, 66]
-    if col_shoe is None: col_shoe = keys[0]  # 第1列：Batch
-    if col_result is None: col_result = keys[5] # 第6列：Exhaustion (对应您的数据)
-    if col_diff is None: col_diff = keys[6]  # 第7列：点差
-    
-    return col_shoe, col_result, col_diff, col_rate, col_mean
+# --- 锁定您的物理表头（以口径模板为唯一真源） ---
+col_shoe   = pick(["Batch", "批次", "全局批次号", "shoe", "靴号", "靴"])
+col_result = pick(["Exhaustion", "结果", "Result", "r", "匹配项", "res"])
+col_diff   = pick(["点差", "diff"])
+col_rate   = pick(["变化率", "rate"])
+col_mean   = pick(["均差", "mean"])
 
 # ------------------------------------------------------------
 # 2) 批次级过滤（序列长度口径｜锁死）
@@ -474,7 +462,7 @@ def _run_report(csv_files, title):
     print(title)
     print("============================================================")
     print("扫描方式：一次性扫描｜一次性交易")
-    print("序列长度口径：禁止跨段累计")
+    print("段长口径：禁止跨段累计")
     print("术语锁死：只承认「⭐ / 投放点」")
     print(f"监测开关：{'开' if MONITOR_ENABLE else '关'}")
     print("阈值击穿归因：路径快照（每次实际投放前都快照；含状态 T 后的重复投放；归因只用快照）")
