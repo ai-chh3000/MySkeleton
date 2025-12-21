@@ -1,4 +1,4 @@
-🛡️🛡️🛡️
+# 🛡️🛡️🛡️
 # -*- coding: utf-8 -*-
 """
 干净母版｜演练引擎（V4｜序列长度口径｜自停｜一次性扫描｜三口术语统一｜未来数封口）
@@ -52,6 +52,19 @@ CONT_TOPK = 10           # 每个位次最多输出 TopK 条转移
 # 结果映射表：已完成 BPT 全阶脱敏，物理匹配实验室标准化 CSV
 # ============================================================
 MAP_RESULT = {"B": "B", "P": "P", "T": "T"}
+
+
+
+def map_result(v):
+    if v is None:
+        return None
+    s = str(v).strip()
+    if s in MAP_RESULT:
+        return MAP_RESULT[s]
+    s2 = s.upper()
+    if s2 in MAP_RESULT:
+        return MAP_RESULT[s2]
+    return None
 
 # ------------------------------------------------------------
 # 工具：安全读取 float / int（只读，不计算）
@@ -122,8 +135,6 @@ def _run_report(csv_files, title):
     # ============================================================
     print("🚀🚀🚀 🍔🍔🍔 🎰🎰🎰") 
     
-    boots = load_all_boots(csv_files) # 原有代码起点 
-    # ... 后续逻辑保持不变
     boots = load_all_boots(csv_files)
 
     total_boots = len(boots)
@@ -195,6 +206,7 @@ def _run_report(csv_files, title):
 
 
 def main():
+    _audit_forbid_idx_offset()
     csv_files = sorted([f for f in os.listdir(".") if f.lower().endswith(".csv")])
     if VERIFY_SPLIT_ENABLE and len(csv_files) >= 2:
         mid = len(csv_files) // 2
@@ -211,30 +223,50 @@ def main():
 # 2) 列自动识别（固定）
 # ------------------------------------------------------------
 def detect_columns(sample_row):
+    # 自动识别：批次列/结果列/点差/变化率/均差
     keys = list(sample_row.keys())
+
+    # 清理表头键：去 BOM、去首尾空格（不修改原数据，只用于匹配）
+    norm_map = {}
+    for k in keys:
+        if isinstance(k, str):
+            kk = k.lstrip("\ufeff").strip()
+        else:
+            kk = k
+        norm_map[kk] = k
+
     def pick(cands):
-        # 1:1 物理匹配 
+        # 1) 直接命中（含清理后的键）
         for c in cands:
-            if c in sample_row: return c
-        # 模糊匹配 
-        for k in keys:
+            if c in sample_row:
+                return c
+            if c in norm_map:
+                return norm_map[c]
+        # 2) 模糊命中（大小写不敏感 + 包含）
+        for raw_k in keys:
+            ks = str(raw_k).lower()
             for c in cands:
-                if c.lower() in k.lower(): return k
+                cs = str(c).lower()
+                if cs == ks or cs in ks:
+                    return raw_k
         return None
 
-# --- 锁定物理表头（以口径模板为唯一真源） ---
-col_shoe   = pick(["Batch", "批次", "全局批次号", "shoe", "靴号", "靴"])
-col_result = pick(["Exhaustion", "结果", "Result", "r", "匹配项", "res"])
-col_diff   = pick(["点差", "diff"])
-col_rate   = pick(["变化率", "rate"])
-col_mean   = pick(["均差", "mean"])
+    # --- 锁定物理表头（以口径模板为唯一真源） ---
+    col_shoe   = pick(["Batch", "批次", "全局批次号", "shoe", "靴号", "靴"])
+    col_result = pick(["Exhaustion", "结果", "Result", "r", "匹配项", "res"])
+    col_diff   = pick(["点差", "diff"])
+    col_rate   = pick(["变化率", "rate"])
+    col_mean   = pick(["均差", "mean"])
 
-    # 物理索引兜底逻辑 [cite: 63]
-    if col_shoe is None: col_shoe = keys[0]
-    if col_result is None: col_result = keys[5] # 对应您 CSV 的第 6 列
-    
+    # 兜底：至少保证 shoe/result 不为 None（否则无法分批次与映射结果）
+    if col_shoe is None and keys:
+        col_shoe = keys[0]
+    if col_result is None and len(keys) >= 2:
+        col_result = keys[1]
+
     return col_shoe, col_result, col_diff, col_rate, col_mean
 # ------------------------------------------------------------
+# 3# ------------------------------------------------------------
 # 3) 批次级过滤（前 9 口｜序列长度口径｜锁死）
 # 规则：只看前 9 口（B/P/T 都计口数）；计算前 9 口内，B 与 P 的“最大序列长度”（T 不计入且不打断）
 # 若 B 最大序列长度 >=3 且 P 最大序列长度 >=3 -> 不可打批次
@@ -424,52 +456,106 @@ def print_cont_stats(cont_stats):
 # - 若你需要连续统计：请在每次【实际投放前】append 快照到 snapshots
 #   快照格式建议：{"bet_no":1, "diff":diff, "rate":rate, "mean":mean}
 # ------------------------------------------------------------
+def _audit_forbid_idx_offset():
+    # 未来数阻断：禁止出现 idx+偏移量 直算行号/读取行 的片段
+    forbidden = [
+        "idx + step_idx", "idx+step_idx",
+        "idx + b_idx", "idx+b_idx",
+        "records[idx +", "records[idx+",
+
+        # 绕路写法（禁止）：区间读取/区间循环/表格式索引
+        "records[idx:","records[idx :","records[ idx:","records[ idx :",
+        "records[idx+1:","records[idx + 1:","records[idx +1:",
+        "range(idx","range(idx +","range( idx",
+        "iloc[",
+
+    ]
+    import inspect
+    try:
+        src = inspect.getsource(run_strategy_on_boot)
+    except Exception:
+        return  # 无法取源时不阻断（极少见）
+    hits = []
+    for frag in forbidden:
+        if frag in src:
+            hits.append(frag)
+    if hits:
+        raise RuntimeError("安全自检失败：检测到禁止片段: " + str(hits))
+
+
+def _execute_trade_with_j_cursor(records, start_j, target_side, units, snapshots):
+    # 执行器：严格使用 j 游标逐行推进；禁止 idx+偏移量 直算
+    # 规则：每次“实际投放前”记录一次快照；状态T 0退回不推进注号，但 j 必须前进
+    j = start_j
+    bet_n = 1
+    while bet_n <= len(units) and j < len(records):
+        decision_row = records[j]
+
+        # 决策口快照（允许读指标：diff/rate/mean）
+        snap = {
+            "bet_no": bet_n,
+            "idx": j,
+            "diff": decision_row.get("diff"),
+            "rate": decision_row.get("rate"),
+            "mean": decision_row.get("mean"),
+        }
+        snapshots.append(snap)
+
+        r = decision_row.get("r")
+        if r == "T":
+            j += 1
+            continue
+
+        u = units[bet_n - 1]
+        if r == target_side:
+            return True, u
+        else:
+            bet_n += 1
+            j += 1
+            continue
+
+    return False, 0
+
+
 def run_strategy_on_boot(records):
-    # 1. 物理槽位初始化
+    # 空策略占位：默认不激活（母版可跑；策略方自行接入结构扫描后再激活）
     snapshots = []
     entry, win, lose, bust = 0, 0, 0, 0
     profit = 0.0
 
-    for idx, r in enumerate(records):
-        # --- A层：结构激活 (DNA检测) ---
-        # 强制锁死：激活必须在辅轴长度 Lw = 1 的时刻
-        if not (current_w_len == 1 and dna_match):
+    # 如需演练，可将下面开关改为 1（仅用于验证链路，不代表任何结构）
+    DEMO_ACTIVATE = 0
+
+    for idx, row in enumerate(records):
+        if not DEMO_ACTIVATE:
             continue
 
-        # --- B层：神谕审计 (Oracle Audit) ---
-        # 探测点：W1 处全量记录，不设物理过滤
-        is_oracle_pass = True 
+        rr = row.get("r")
+        if idx < 9 or rr not in ("B", "P"):
+            continue
 
-        if is_oracle_pass:
-            # --- C层：执行与 1248 动态归因 ---
-            entry += 1
-            units = [1, 2, 4, 8]
-            is_settled = False
+        target_side = "B"
+        units = [1, 2, 4, 8]
 
-            for b_idx, u in enumerate(units):
-                # 物理步进：逐行读取结果，严禁切片 
-                curr_row = records[idx + b_idx]
-                
-                # 归因快照：记录当前层级，锁定 idx 为 W1 行号
-                snap = {'bet_no': b_idx + 1, 'idx': idx, 'mean': curr_row['mean']}
-                snapshots.append(snap)
+        entry += 1
+        start_j = idx + 1  # 投放点下一行
+        ok, u_win = _execute_trade_with_j_cursor(records, start_j, target_side, units, snapshots)
 
-                # 动态结算：发现匹配立即 Match 并物理断流
-                if curr_row['r'] == target:
-                    win += 1
-                    profit += (u * 0.95)
-                    is_settled = True
-                    break 
+        if ok:
+            win += 1
+            profit += (u_win * 0.95 if target_side == "B" else u_win * 1.0)
+        else:
+            lose += 1
+            bust += 1
+            profit -= sum(units)
 
-            if not is_settled:
-                lose += 1
-                bust += 1 # 1248 全输即为阈值击穿
-                profit -= sum(units)
-            
-            break # 一次性扫描锁死：每批次仅 1 次执行
-            
-    return {"entry": entry, "win": win, "lose": lose, "bust": bust, "profit": profit, "snapshots": snapshots}    
+        break  # 一次性扫描锁死：每批次仅 1 次执行
 
+    # bust 归因回填：连续统计只允许读 snapshots
+    for s in snapshots:
+        if isinstance(s, dict):
+            s["trade_bust"] = 1 if bust > 0 else 0
 
+    return {"entry": entry, "win": win, "lose": lose, "bust": bust, "profit": profit, "snapshots": snapshots}
 if __name__ == "__main__":
     main()

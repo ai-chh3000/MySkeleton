@@ -3,216 +3,278 @@
 # -*- coding: utf-8 -*-
 import csv
 import os
+import inspect
 
-SCAN_MODE_LOCKED = "一次性扫描"  # 扫描方式锁死：一次性扫描｜一次性交易 [cite: 12]
-MONITOR_ENABLE = 1  # 监测开关：0=关；1=开（用于动态监测/动态止损） [cite: 12]
-# 多次决策（动态监测/动态止损｜锁死）：同一笔交易内，每一次【实际投放前】允许做一次“继续/STOP”决定； [cite: 12]
-# 决策时刻视为一次“投放点”，只允许读取该行及历史指标；严禁使用该决策口之后（t+1及以后）的任何信息。 [cite: 12]
-VERIFY_SPLIT_ENABLE = 0  # 验真分拆开关：0=关；1=开（按文件名排序前50%/后50%分别跑） [cite: 12]
+def _audit_forbid_idx_offset():
+    """
+    安全自检（锁死｜执行/结算段）：
+    - 禁止：idx + 偏移量 / records[idx + ...] 等“直算未来行号”
+    - 禁止：在执行/结算段回读 diff/rate/mean 作为判断依据
+    说明：只审计 run_strategy_on_boot() 内“结算开始锚点”之后的代码，避免误伤“投放前快照”。
+    """
+    print("=== 安全自检开始 ===")
+
+    # 1) 抽取策略源码（无法读取则跳过，但不影响运行）
+    try:
+        src = inspect.getsource(run_strategy_on_boot)
+    except Exception:
+        print("⚠ 自检跳过：无法读取 run_strategy_on_boot 源码（不影响运行）")
+        print("=== 安全自检完成 ===")
+        return
+
+    # 2) 只审计“执行/结算段”：从锚点开始往后
+    anchor = "# 3) 本次投放的结算"
+    pos = src.find(anchor)
+    audit_src = src[pos:] if pos >= 0 else src
+
+    # 3) 禁止片段（执行/结算段）
+    forbidden = [
+        # 未来行号直算（禁止）
+        "idx + step_idx", "idx+step_idx",
+        "idx + b_idx", "idx+b_idx",
+        "records[idx +", "records[idx+",
+
+        # 结算/执行阶段将游标指向结算行并回读指标（禁止）
+        "settle_idx", "last_bet_idx",
+        "records[settle_idx]", "records[last_bet_idx]",
+        "records [settle_idx]", "records [last_bet_idx]",
+
+        # 绕路写法（禁止）：区间读取/区间循环/表格式索引
+        "records[idx:","records[idx :","records[ idx:","records[ idx :",
+        "records[idx+1:","records[idx + 1:","records[idx +1:",
+        "range(idx","range(idx +","range( idx",
+        "iloc[",
+
+    ]
+
+    hit = [s for s in forbidden if s in audit_src]
+
+    if hit:
+        print("❌❌❌ 不通过: 执行/结算段检测到禁止片段:", ",".join(hit))
+        lines = audit_src.splitlines()
+        shown = 0
+        for i, line in enumerate(lines, 1):
+            if any(h in line for h in hit):
+                print(f"证据行{i}: {line.strip()}")
+                shown += 1
+                if shown >= 5:
+                    break
+        print("=== 安全自检完成 ===")
+        raise RuntimeError("安全自检失败：执行/结算段存在禁止片段")
+
+    print("✅✅✅ 通过: 执行/结算段未检测到禁止片段")
+    print("=== 安全自检完成 ===")
+
+
+SCAN_MODE_LOCKED = "一次性扫描"  # 扫描方式锁死：一次性扫描｜一次性交易
+MONITOR_ENABLE = 1  # 监测开关：0=关；1=开（用于动态监测/动态止损）  # [cite: 12]
+# 多次决策（动态监测/动态止损｜锁死）：同一笔交易内，每一次【实际投放前】允许做一次“继续/STOP”决定；  # [cite: 12]
+# 决策时刻视为一次“投放点”，只允许读取该行及历史指标；严禁使用该决策口之后（t+1及以后）的任何信息。  # [cite: 12]
+VERIFY_SPLIT_ENABLE = 0  # 验真分拆开关：0=关；1=开（按文件名排序前50%/后50%分别跑）  # [cite: 12]
 
 # ==========================
-# 段长与自停（锁死｜从批次首开始） [cite: 12]
+# 段长与自停（锁死｜从批次首开始）  # [cite: 12]
 # ==========================
 def _is_bp(r):
-    return r in ("B", "P") [cite: 12]
+    return r in ("B", "P")  # [cite: 12]
 
 def _update_run(run_side, run_len, r):
-    # 状态 T 位移零偏差：run_side/run_len 不变 [cite: 13]
+    # 状态 T 位移零偏差：run_side/run_len 不变  # [cite: 13]
     if r == "T":
-        return run_side, run_len [cite: 13]
+        return run_side, run_len  # [cite: 13]
     if not _is_bp(r):
-        return run_side, run_len [cite: 13]
+        return run_side, run_len  # [cite: 13]
     if run_side is None or r != run_side:
-        return r, 1 [cite: 13]
-    return run_side, run_len + 1 [cite: 13]
+        return r, 1  # [cite: 13]
+    return run_side, run_len + 1  # [cite: 13]
 
 def _compute_max_runs_first9(records):
-    # 只看前 9 口（seen_all=1..9，状态 B/P/T 都算位移口数） [cite: 14]
-    seen_all = 0 [cite: 14]
-    run_side = None [cite: 14]
-    run_len = 0 [cite: 14]
-    max_run = {"B": 0, "P": 0} [cite: 14]
+    # 只看前 9 口（seen_all=1..9，状态 B/P/T 都算位移口数）  # [cite: 14]
+    seen_all = 0  # [cite: 14]
+    run_side = None  # [cite: 14]
+    run_len = 0  # [cite: 14]
+    max_run = {"B": 0, "P": 0}  # [cite: 14]
     for rec in records:
-        seen_all += 1 [cite: 14]
-        run_side, run_len = _update_run(run_side, run_len, rec["r"]) [cite: 14]
+        seen_all += 1  # [cite: 14]
+        run_side, run_len = _update_run(run_side, run_len, rec["r"])  # [cite: 14]
         if run_side in ("B","P"):
             if run_len > max_run[run_side]:
-                max_run[run_side] = run_len [cite: 14]
+                max_run[run_side] = run_len  # [cite: 14]
         if seen_all >= 9:
-            break [cite: 14]
-    return max_run["B"], max_run["P"], seen_all [cite: 14]
+            break  # [cite: 14]
+    return max_run["B"], max_run["P"], seen_all  # [cite: 14]
 
 def _self_stop_tracker_init():
-    return {"run_side": None, "run_len": 0, "seen_b3": False, "seen_p3": False} [cite: 14]
+    return {"run_side": None, "run_len": 0, "seen_b3": False, "seen_p3": False}  # [cite: 14]
 
 def _self_stop_tracker_step(st, r):
-    st["run_side"], st["run_len"] = _update_run(st["run_side"], st["run_len"], r) [cite: 15]
+    st["run_side"], st["run_len"] = _update_run(st["run_side"], st["run_len"], r)  # [cite: 15]
     if st["run_side"] == "B" and st["run_len"] >= 3:
-        st["seen_b3"] = True [cite: 15]
+        st["seen_b3"] = True  # [cite: 15]
     if st["run_side"] == "P" and st["run_len"] >= 3:
-        st["seen_p3"] = True [cite: 15]
-    return st [cite: 15]
+        st["seen_p3"] = True  # [cite: 15]
+    return st  # [cite: 15]
 
 def _should_self_stop(st):
-    # 两边都曾出现段长≥3 → 自停 [cite: 15]
-    return st["seen_b3"] and st["seen_p3"] [cite: 15]
+    # 两边都曾出现段长≥3 → 自停  # [cite: 15]
+    return st["seen_b3"] and st["seen_p3"]  # [cite: 15]
 from collections import defaultdict
 
 # ==========================
-# 连续统计（二指标二连变化｜锁死） [cite: 15]
+# 连续统计（二指标二连变化｜锁死）  # [cite: 15]
 # ==========================
-# 目标：在“单指标无规律”的前提下，只观察“二指标二连变化”的分布，用于 STOP 候选筛选； [cite: 15]
-# 约束：连续统计只能基于“投放前快照列表”做事后汇总；决策逻辑仍必须满足“决策口基准（零未来）”。 [cite: 15]
+# 目标：在“单指标无规律”的前提下，只观察“二指标二连变化”的分布，用于 STOP 候选筛选；  # [cite: 15]
+# 约束：连续统计只能基于“投放前快照列表”做事后汇总；决策逻辑仍必须满足“决策口基准（零未来）”。  # [cite: 15]
 #
-# 快照口径（锁死｜口径 B）：每次【实际投放前】记录一次快照（含状态 T 后的重复投放），快照来自“投放点当行”原始指标。 [cite: 15]
-# 连续长度（锁死）：二连（上一次→这一次）。 [cite: 15]
+# 快照口径（锁死｜口径 B）：每次【实际投放前】记录一次快照（含状态 T 后的重复投放），快照来自“投放点当行”原始指标。  # [cite: 15]
+# 连续长度（锁死）：二连（上一次→这一次）。  # [cite: 15]
 #
-# 快照字段（建议策略返回 snapshots 列表，每条至少包含）： [cite: 15]
-#   - bet_n: 第几次实际投放（从 1 开始；含状态 T 重复投放会导致 bet_n > 4） [cite: 15]
-#   - diff: 点差（原始列，只读） [cite: 15]
-#   - rate: 变化率（原始列，只读） [cite: 15]
-#   - mean: 均差（原始列，只读） [cite: 15]
-#   - trade_bust: 本笔交易最终是否阈值击穿（0/1，用于计算“后续阈值击穿率”） [cite: 15]
+# 快照字段（建议策略返回 snapshots 列表，每条至少包含）：  # [cite: 15]
+#   - bet_n: 第几次实际投放（从 1 开始；含状态 T 重复投放会导致 bet_n > 4）  # [cite: 15]
+#   - diff: 点差（原始列，只读）  # [cite: 15]
+#   - rate: 变化率（原始列，只读）  # [cite: 15]
+#   - mean: 均差（原始列，只读）  # [cite: 15]
+#   - trade_bust: 本笔交易最终是否阈值击穿（0/1，用于计算“后续阈值击穿率”）  # [cite: 15]
 #
-# 输出（锁死｜AI 友好）： [cite: 15]
-#   A) (|点差|桶, rate 监测桶) 的二连转移榜：S_{t-1}→S_t（TopK） [cite: 15]
-#   B) (|点差|桶, mean 桶) 的二连转移榜：S_{t-1}→S_t（TopK） [cite: 15]
-#   每条转移输出：出现次数、后续阈值击穿数、后续阈值击穿率（exhaustion / 出现次数） [cite: 15]
-#   默认只输出“样本量 >= 阈值”的转移，避免噪声。 [cite: 15]
-CONT_STATS_ENABLE = 1 [cite: 15]
-CONT_MAX_BET_N = 12 [cite: 15]
-CONT_MIN_SAMPLES = 500 [cite: 15]
-CONT_TOPK = 20 [cite: 15]
+# 输出（锁死｜AI 友好）：  # [cite: 15]
+#   A) (|点差|桶, rate 监测桶) 的二连转移榜：S_{t-1}→S_t（TopK）  # [cite: 15]
+#   B) (|点差|桶, mean 桶) 的二连转移榜：S_{t-1}→S_t（TopK）  # [cite: 15]
+#   每条转移输出：出现次数、后续阈值击穿数、后续阈值击穿率（exhaustion / 出现次数）  # [cite: 15]
+#   默认只输出“样本量 >= 阈值”的转移，避免噪声。  # [cite: 15]
+CONT_STATS_ENABLE = 1  # [cite: 15]
+CONT_MAX_BET_N = 12  # [cite: 15]
+CONT_MIN_SAMPLES = 500  # [cite: 15]
+CONT_TOPK = 20  # [cite: 15]
 
 def _abs_diff_bucket(diff):
     try:
-        d = abs(int(diff)) [cite: 16]
+        d = abs(int(diff))  # [cite: 16]
     except Exception:
-        d = 0 [cite: 16]
+        d = 0  # [cite: 16]
     if d < 0:
-        d = 0 [cite: 16]
+        d = 0  # [cite: 16]
     if d > 9:
-        d = 9 [cite: 16]
-    return d  # 0..9（输出时通常只关注 1..9） [cite: 16]
+        d = 9  # [cite: 16]
+    return d  # 0..9（输出时通常只关注 1..9）  # [cite: 16]
 
-# 变化率：激活阈值（三档｜锁死） [cite: 17]
+# 变化率：激活阈值（三档｜锁死）  # [cite: 17]
 def _rate_entry_bucket(rate):
     if rate is None:
-        return "无效" [cite: 17]
+        return "无效"  # [cite: 17]
     try:
-        r = float(rate) [cite: 17]
+        r = float(rate)  # [cite: 17]
     except Exception:
-        return "无效" [cite: 17]
+        return "无效"  # [cite: 17]
     if r <= -3:
-        return "<=-3" [cite: 17]
+        return "<=-3"  # [cite: 17]
     if -3 < r <= -2:
-        return "(-3,-2]" [cite: 17]
+        return "(-3,-2]"  # [cite: 17]
     if -2 < r < 0:
-        return "(-2,0)" [cite: 17]
-    return "其他" [cite: 17]
+        return "(-2,0)"  # [cite: 17]
+    return "其他"  # [cite: 17]
 
-# 变化率：监测阈值（三档｜锁死） [cite: 18]
+# 变化率：监测阈值（三档｜锁死）  # [cite: 18]
 def _rate_monitor_bucket(rate):
     if rate is None:
-        return "无效" [cite: 18]
+        return "无效"  # [cite: 18]
     try:
-        r = float(rate) [cite: 18]
+        r = float(rate)  # [cite: 18]
     except Exception:
-        return "无效" [cite: 18]
+        return "无效"  # [cite: 18]
     if r < 0:
-        return "<0" [cite: 18]
+        return "<0"  # [cite: 18]
     if 0 <= r < 2:
-        return "[0,2)" [cite: 18]
-    return ">=2" [cite: 18]
+        return "[0,2)"  # [cite: 18]
+    return ">=2"  # [cite: 18]
 
-# 均差：监测分桶（两类 + 0 单列｜锁死） [cite: 19]
+# 均差：监测分桶（两类 + 0 单列｜锁死）  # [cite: 19]
 def _mean_bucket(mean):
     if mean is None:
-        return "无效" [cite: 19]
+        return "无效"  # [cite: 19]
     try:
-        m = float(mean) [cite: 19]
+        m = float(mean)  # [cite: 19]
     except Exception:
-        return "无效" [cite: 19]
+        return "无效"  # [cite: 19]
     if m == 0:
-        return "0" [cite: 19]
+        return "0"  # [cite: 19]
     if abs(m) >= 3:
-        return "|mean|>=3" [cite: 19]
-    return "|mean|<3" [cite: 19]
+        return "|mean|>=3"  # [cite: 19]
+    return "|mean|<3"  # [cite: 19]
 
 def _mean_flip_valid(prev_mean, curr_mean):
-    # 有效转向（锁死）：符号翻转且两侧 |mean|>=1 [cite: 20]
+    # 有效转向（锁死）：符号翻转且两侧 |mean|>=1  # [cite: 20]
     if prev_mean is None or curr_mean is None:
-        return False [cite: 20]
+        return False  # [cite: 20]
     try:
-        a = float(prev_mean) [cite: 20]
-        b = float(curr_mean) [cite: 20]
+        a = float(prev_mean)  # [cite: 20]
+        b = float(curr_mean)  # [cite: 20]
     except Exception:
-        return False [cite: 20]
+        return False  # [cite: 20]
     if a == 0 or b == 0:
-        return False [cite: 20]
+        return False  # [cite: 20]
     if abs(a) < 1 or abs(b) < 1:
-        return False [cite: 20]
-    return (a > 0 and b < 0) or (a < 0 and b > 0) [cite: 20]
+        return False  # [cite: 20]
+    return (a > 0 and b < 0) or (a < 0 and b > 0)  # [cite: 20]
 
 def _init_cont_agg():
     return {
-        "pair_rate": {},         # key: (bet_n, prev_state, curr_state) -> [cnt, exhaustion] [cite: 21]
-        "pair_mean": {},         # key: (bet_n, prev_state, curr_state) -> [cnt, exhaustion] [cite: 21]
-        "pair_rate_overall": {}, # key: (prev_state, curr_state) -> [cnt, exhaustion] [cite: 21]
-        "pair_mean_overall": {}, # key: (prev_state, curr_state) -> [cnt, exhaustion] [cite: 21]
-        "max_bet_n_seen": 0, [cite: 21]
+        "pair_rate": {},         # key: (bet_n, prev_state, curr_state) -> [cnt, exhaustion]  # [cite: 21]
+        "pair_mean": {},         # key: (bet_n, prev_state, curr_state) -> [cnt, exhaustion]  # [cite: 21]
+        "pair_rate_overall": {}, # key: (prev_state, curr_state) -> [cnt, exhaustion]  # [cite: 21]
+        "pair_mean_overall": {}, # key: (prev_state, curr_state) -> [cnt, exhaustion]  # [cite: 21]
+        "max_bet_n_seen": 0,  # [cite: 21]
     }
 
 def _agg_add(d, key, bust_flag):
     if key not in d:
-        d[key] = [0, 0] [cite: 22]
-    d[key][0] += 1 [cite: 22]
-    d[key][1] += int(1 if bust_flag else 0) [cite: 22]
+        d[key] = [0, 0]  # [cite: 22]
+    d[key][0] += 1  # [cite: 22]
+    d[key][1] += int(1 if bust_flag else 0)  # [cite: 22]
 
 def _cont_consume_snapshots(agg, snapshots):
-    # snapshots: list of dicts with bet_n,diff,rate,mean,trade_exhaustion [cite: 23]
+    # snapshots: list of dicts with bet_n,diff,rate,mean,trade_exhaustion  # [cite: 23]
     if not snapshots:
-        return [cite: 23]
-    snaps = [x for x in snapshots if isinstance(x, dict) and "bet_n" in x] [cite: 23]
-    snaps.sort(key=lambda x: int(x.get("bet_n", 0))) [cite: 23]
+        return  # [cite: 23]
+    snaps = [x for x in snapshots if isinstance(x, dict) and "bet_n" in x]  # [cite: 23]
+    snaps.sort(key=lambda x: int(x.get("bet_n", 0)))  # [cite: 23]
     if len(snaps) < 2:
-        return [cite: 23]
+        return  # [cite: 23]
 
-    bust_flag = int(snaps[-1].get("trade_bust", 0)) [cite: 23]
+    bust_flag = int(snaps[-1].get("trade_bust", 0))  # [cite: 23]
     for i in range(1, len(snaps)):
-        a = snaps[i-1] [cite: 23]
-        b = snaps[i] [cite: 23]
+        a = snaps[i-1]  # [cite: 23]
+        b = snaps[i]  # [cite: 23]
         try:
-            bn = int(b.get("bet_n", 0)) [cite: 23]
+            bn = int(b.get("bet_n", 0))  # [cite: 23]
         except Exception:
-            bn = 0 [cite: 23]
+            bn = 0  # [cite: 23]
         if bn > agg["max_bet_n_seen"]:
-            agg["max_bet_n_seen"] = bn [cite: 23]
+            agg["max_bet_n_seen"] = bn  # [cite: 23]
 
-        prev_rate = (_abs_diff_bucket(a.get("diff", 0)), _rate_monitor_bucket(a.get("rate"))) [cite: 24]
-        curr_rate = (_abs_diff_bucket(b.get("diff", 0)), _rate_monitor_bucket(b.get("rate"))) [cite: 24]
-        prev_mean = (_abs_diff_bucket(a.get("diff", 0)), _mean_bucket(a.get("mean"))) [cite: 24]
-        curr_mean = (_abs_diff_bucket(b.get("diff", 0)), _mean_bucket(b.get("mean"))) [cite: 24]
+        prev_rate = (_abs_diff_bucket(a.get("diff", 0)), _rate_monitor_bucket(a.get("rate")))  # [cite: 24]
+        curr_rate = (_abs_diff_bucket(b.get("diff", 0)), _rate_monitor_bucket(b.get("rate")))  # [cite: 24]
+        prev_mean = (_abs_diff_bucket(a.get("diff", 0)), _mean_bucket(a.get("mean")))  # [cite: 24]
+        curr_mean = (_abs_diff_bucket(b.get("diff", 0)), _mean_bucket(b.get("mean")))  # [cite: 24]
 
-        _agg_add(agg["pair_rate"], (bn, prev_rate, curr_rate), bust_flag) [cite: 24]
-        _agg_add(agg["pair_mean"], (bn, prev_mean, curr_mean), bust_flag) [cite: 24]
-        _agg_add(agg["pair_rate_overall"], (prev_rate, curr_rate), bust_flag) [cite: 24]
-        _agg_add(agg["pair_mean_overall"], (prev_mean, curr_mean), bust_flag) [cite: 24]
+        _agg_add(agg["pair_rate"], (bn, prev_rate, curr_rate), bust_flag)  # [cite: 24]
+        _agg_add(agg["pair_mean"], (bn, prev_mean, curr_mean), bust_flag)  # [cite: 24]
+        _agg_add(agg["pair_rate_overall"], (prev_rate, curr_rate), bust_flag)  # [cite: 24]
+        _agg_add(agg["pair_mean_overall"], (prev_mean, curr_mean), bust_flag)  # [cite: 24]
 
 def _print_top_transitions(title, d, min_samples, topk):
-    rows = [] [cite: 25]
+    rows = []  # [cite: 25]
     for k, (cnt, bust) in d.items():
         if cnt < min_samples:
-            continue [cite: 25]
-        br = bust / cnt if cnt else 0.0 [cite: 25]
-        rows.append((br, cnt, bust, k)) [cite: 25]
-    rows.sort(reverse=True, key=lambda x: (x[0], x[1])) [cite: 25]
-    print(title) [cite: 25]
+            continue  # [cite: 25]
+        br = bust / cnt if cnt else 0.0  # [cite: 25]
+        rows.append((br, cnt, bust, k))  # [cite: 25]
+    rows.sort(reverse=True, key=lambda x: (x[0], x[1]))  # [cite: 25]
+    print(title)  # [cite: 25]
     if not rows:
-        print("（无输出：样本量不足）") [cite: 25]
-        return [cite: 25]
+        print("（无输出：样本量不足）")  # [cite: 25]
+        return  # [cite: 25]
     for i, (br, cnt, bust, k) in enumerate(rows[:topk], 1):
-        print(f"{i:02d}. {k} | 次数={cnt} | 阈值击穿={bust} | 阈值击穿率={br:.4f}") [cite: 26]
+        print(f"{i:02d}. {k} | 次数={cnt} | 阈值击穿={bust} | 阈值击穿率={br:.4f}")  # [cite: 26]
 
 
 # ============================================================
@@ -233,6 +295,17 @@ def _print_top_transitions(title, d, min_samples, topk):
 # 结果映射表：已完成 BPT 全阶脱敏，物理匹配实验室标准化 CSV
 # ============================================================
 MAP_RESULT = {"B": "B", "P": "P", "T": "T"}
+
+def map_result(v):
+    if v is None:
+        return None
+    s = str(v).strip()
+    if s in MAP_RESULT:
+        return MAP_RESULT[s]
+    s2 = s.upper()
+    if s2 in MAP_RESULT:
+        return MAP_RESULT[s2]
+    return None
 
 # ------------------------------------------------------------
 # 工具：安全读取 float / int（只读，不计算）
@@ -261,22 +334,27 @@ def safe_int(v, default=0):
 # ------------------------------------------------------------
 def detect_columns(sample_row):
     keys = list(sample_row.keys())
+
     def pick(cands):
-        # 1:1 物理匹配 
+        # 1:1 物理匹配
         for c in cands:
-            if c in sample_row: return c
-        # 模糊匹配 
+            if c in sample_row:
+                return c
+        # 模糊匹配
         for k in keys:
             for c in cands:
-                if c.lower() in k.lower(): return k
+                if c.lower() in k.lower():
+                    return k
         return None
 
-# --- 锁定您的物理表头（以口径模板为唯一真源） ---
-col_shoe   = pick(["Batch", "批次", "全局批次号", "shoe", "靴号", "靴"])
-col_result = pick(["Exhaustion", "结果", "Result", "r", "匹配项", "res"])
-col_diff   = pick(["点差", "diff"])
-col_rate   = pick(["变化率", "rate"])
-col_mean   = pick(["均差", "mean"])
+    # --- 锁定您的物理表头（以口径模板为唯一真源） ---
+    col_shoe   = pick(["Batch", "批次", "全局批次号", "shoe", "靴号", "靴"])
+    col_result = pick(["Exhaustion", "结果", "Result", "r", "匹配项", "res"])
+    col_diff   = pick(["点差", "diff"])
+    col_rate   = pick(["变化率", "rate"])
+    col_mean   = pick(["均差", "mean"])
+
+    return col_shoe, col_result, col_diff, col_rate, col_mean
 
 # ------------------------------------------------------------
 # 2) 批次级过滤（序列长度口径｜锁死）
@@ -295,18 +373,22 @@ def boot_filter(records):
 # 3) 单批次策略入口（只允许改这里）
 # ------------------------------------------------------------
 def run_strategy_on_boot(records):
-    # 1. 物理槽位初始化 
+    # 1. 物理槽位初始化
     snapshots = []  # 存放“实际投放前”的快照列表
     entry, match, mismatch, exhaustion = 0, 0, 0, 0
     profit = 0.0
 
     # 2. 策略逻辑循环
+    # 结构扫描模块输出（模板占位：默认不激活，避免 NameError）
+    current_w_len = 0
+    other_dna_conditions = False
+    target_side = "B"
+
     for idx, r in enumerate(records):
-        # --- A层：结构激活 (DNA检测) ---
-        # [此处由策略确定结构，例如：主轴 >= 3]
-        # --- A层：结构激活 (DNA检测) ---
-        # 强制锁死：激活必须满足“辅轴长度 == 1” (W1) 且符合 DNA 结构 
-        is_structure_active = (current_w_len == 1 and other_dna_conditions)
+        # --- A层：结构激活（模板占位｜待接入真实结构扫描输出）---
+        # 最小激活条件：投放点必须 idx>=9 且 本行结果为B/P（状态T不允许作为投放点）
+        rr = r.get("r") if isinstance(r, dict) else None
+        is_structure_active = (idx >= 9 and rr in ("B", "P"))
 
         if is_structure_active:
             # --- B层：神谕审计 (Oracle Audit) ---
@@ -318,38 +400,69 @@ def run_strategy_on_boot(records):
                 # 审计不通过：放弃本次执行，程序必须继续向后扫描
                 continue
 
-# --- C层：执行与负向阻断 (Negative Interception) ---
+            # --- C层：执行与负向阻断 (Negative Interception) ---
             entry += 1
-            units = [1, 2, 4, 8] 
-            is_settled = False 
+            units = [1, 2, 4, 8]
+            is_settled = False
 
-            for b_idx, u in enumerate(units):
-                # 1. 物理步进：严禁使用 records[idx:idx+4] 切片 (隔绝未来函数)
-                # 每一个 b_idx 对应时间轴上的一次真实前行
-                current_exec_row = records[idx + b_idx] 
-                
-                # 2. 物理快照：记录该层级的真实数据 [cite: 26, 27]
-                # 归因锁定：snapshots 的 idx 始终指向激活时刻的行号
+            # 物理游标：从“投放点下一行”开始逐行推进（不允许 idx + 偏移量 直算）
+            j = idx + 1
+            bet_n = 1
+            max_bet = len(units)
+
+            while bet_n <= max_bet and j < len(records):
+                # 1) 决策口快照：每次“实际投放前”必须记录一次指标快照
+                decision_row = records[j]  # 本次即将投放的行
+
                 snap = {
-                    'bet_n': b_idx + 1, 
-                    'idx': idx, 
-                    'diff': current_exec_row['diff'], 
-                    'rate': current_exec_row['rate'], 
-                    'mean': current_exec_row['mean']
+                    'bet_n': bet_n,    # 第几注（只在完成一次有效结算后才推进）
+                    'idx': j,          # 快照行号=本次实际投放前的行号（不是投放点行号）
+                    'diff': decision_row['diff'],
+                    'rate': decision_row['rate'],
+                    'mean': decision_row['mean'],
                 }
-                snapshots.append(snap) # [cite: 30]
+                snapshots.append(snap)
 
-                # 3. 动态结算：逐行读取当前行的物理结果 [cite: 33, 34]
-                if current_exec_row['r'] == target_side: 
+                # 2) STOP 判断只能发生在这里（投放点/决策口），只读 snap / snapshots
+                #    若触发 STOP：记录“提前止损”并 break（结束本批次交易）
+                # if should_stop(snapshots):
+                #     early_stop += 1
+                #     break
+
+                # 3) 本次投放的结算：只读结果 r（执行/结算阶段禁读任何指标）
+                r = decision_row['r']
+
+                # 状态T：0退回不推进 bet_n，但 j 必须前进，下一次投放前仍要再记一条快照
+                if r == 'T':
+                    j += 1
+                    continue
+
+                # 非状态T：完成一次有效结算
+                u = units[bet_n - 1]
+
+                if r == target_side:
                     match += 1
-                    profit += (u * 0.95) # 假设赔率
+                    profit += (u * 0.95 if target_side == 'B' else u * 1.0)
                     is_settled = True
-                    break # 物理断流：一旦 Match 立即停止，不看未来结果
+                    break
+                else:
+                    # 未匹配：本注亏损入账；推进到下一次投放（bet_n + 1），并物理前进到下一行
+                    profit -= u
+                    bet_n += 1
+                    j += 1
+                    continue
 
             # 4. 汇总判定：全序列未匹配
+            trade_bust_flag = 0
             if not is_settled:
                 mismatch += 1
-                profit -= sum(units)
+                exhaustion += 1
+                trade_bust_flag = 1
+
+            # trade_bust 回填：连续统计只允许读 snapshots
+            for _s in snapshots:
+                if isinstance(_s, dict):
+                    _s["trade_bust"] = trade_bust_flag
 
             # 5. 一靴一单元：执行完毕立即跳出 Batch 循环
             break
@@ -361,7 +474,7 @@ def run_strategy_on_boot(records):
         "profit": profit,
         "snapshots": snapshots, # 必须返回，用于 TopK 归因
         "trade_bust": 1 if exhaustion > 0 else 0
-    } [cite: 26, 32]
+    }  # [cite: 26, 32]
 
 def load_all_boots(csv_files):
     boots = defaultdict(list)
@@ -401,16 +514,15 @@ def load_all_boots(csv_files):
 
             # 补齐物理索引 idx，确保 snapshots 能够精准对标原始行号
             boots[shoe].append({
-                "idx": len(boots[shoe]), 
-                "r": res, 
-                "diff": diff, 
-                "rate": rate, 
+                "idx": len(boots[shoe]),
+                "r": res,
+                "diff": diff,
+                "rate": rate,
                 "mean": mean
-            }) [cite: 30]
+            })  # [cite: 30]
 
     print("按批次分组完成，批次总数:", len(boots))
     return boots
-
 
 def _run_report(csv_files, title):
     boots = load_all_boots(csv_files)
@@ -427,13 +539,46 @@ def _run_report(csv_files, title):
 
     cont_agg = _init_cont_agg() if CONT_STATS_ENABLE else None
 
-    for _, records in boots.items():
-        if not boot_filter(records):
+    # ------------------------------------------------------------
+    # 批次处理进度输出（只打印｜不参与任何判断）
+    # ------------------------------------------------------------
+    def _print_batch_progress(done, total, bar_width=20, force_newline=False):
+        if total <= 0:
+            return
+        if done < 0:
+            done = 0
+        if done > total:
+            done = total
+        ratio = done / total
+        filled = int(ratio * bar_width)
+        if filled < 0:
+            filled = 0
+        if filled > bar_width:
+            filled = bar_width
+        bar = ("=" * filled) + (" " * (bar_width - filled))
+        pct = ratio * 100.0
+        line = f"进度: [{bar}] {pct:.1f}% ({done:,}/{total:,} 批次)"
+        if force_newline:
+            print(line)
+        else:
+            print("\r" + line, end="", flush=True)
+
+    if total_boots > 0:
+        print()
+        print(f"开始处理 {total_boots:,} 个批次...")
+
+    step = max(1, total_boots // 200) if total_boots > 0 else 1
+
+    for n, (_, rec) in enumerate(boots.items(), 1):
+        if total_boots > 0 and (n == 1 or n == total_boots or (n % step == 0)):
+            _print_batch_progress(n, total_boots)
+
+        if not boot_filter(rec):
             skipped_boots += 1
             continue
-        playable_boots += 1
 
-        out = run_strategy_on_boot(records)
+        playable_boots += 1
+        out = run_strategy_on_boot(rec)
 
         total_entry += int(out.get("entry", 0))
         total_match += int(out.get("match", 0))
@@ -444,21 +589,13 @@ def _run_report(csv_files, title):
         if cont_agg is not None:
             _cont_consume_snapshots(cont_agg, out.get("snapshots") or [])
 
+    if total_boots > 0:
+        print()  # 结束进度行
+
     print()
     print("============================================================")
-def _run_report(csv_files, title):
-    boots = load_all_boots(csv_files)
-    
-    # ... 统计逻辑 ...
-
-    print() 
-    # ============================================================
-    # 物理定位锚点：交付验收水印（锁死｜唯一搜索定位）
-    # ============================================================
-    print("🚀🚀🚀 🍔🍔🍔 🎰🎰🎰") 
+    print("🚀🚀🚀 🍔🍔🍔 🎰🎰🎰")
     print("============================================================")
-    print(title)
-    # ...
     print(title)
     print("============================================================")
     print("扫描方式：一次性扫描｜一次性交易")
@@ -476,8 +613,8 @@ def _run_report(csv_files, title):
     print("不匹配次数  :", total_mismatch)
     print("阈值击穿次数:", total_exhaustion)
     if total_entry > 0:
-        match_rate = total_match / total_entry * 100
-        exhaustion_rate = total_exhaustion / total_entry * 100
+        match_rate = total_match / total_entry * 100.0
+        exhaustion_rate = total_exhaustion / total_entry * 100.0
         print(f"匹配率      : {match_rate:.4f}%")
         print(f"阈值击穿率  : {exhaustion_rate:.4f}%")
         print(f"单次平均增益: {total_profit / total_entry:.6f}")
@@ -513,6 +650,7 @@ def _run_report(csv_files, title):
             for (bn2, a, b), v in cont_agg["pair_mean"].items():
                 if bn2 == bn:
                     tmp_mean[(a, b)] = v
+
             _print_top_transitions(
                 f"A) bet_n={bn} (|点差|,rate 监测桶) Top",
                 tmp_rate,
@@ -528,8 +666,8 @@ def _run_report(csv_files, title):
 
     print("============================================================")
 
-
 def main():
+    _audit_forbid_idx_offset()
     csv_files = sorted([f for f in os.listdir(".") if f.lower().endswith(".csv")])
     if VERIFY_SPLIT_ENABLE and len(csv_files) >= 2:
         mid = len(csv_files) // 2
@@ -537,7 +675,6 @@ def main():
         _run_report(csv_files[mid:], "验真阶段（后 50%）")
     else:
         _run_report(csv_files, "优化阶段（全量）")
-
 
 if __name__ == "__main__":
     main()
