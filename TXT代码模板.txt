@@ -5,6 +5,10 @@ import csv
 import os
 import inspect
 
+# 表头自证：只打印一次
+_HEADER_MAPPING_PRINTED = False
+
+
 def _audit_forbid_idx_offset():
     """
     安全自检（锁死｜执行/结算段）：
@@ -332,33 +336,108 @@ def safe_int(v, default=0):
 # ------------------------------------------------------------
 # 0) 列识别与映射（固定｜只读）
 # ------------------------------------------------------------
-def detect_columns(sample_row):
-    keys = list(sample_row.keys())
+def _norm_key(k):
+    return str(k).strip().lower() if k is not None else ""
 
-    def pick(cands):
-        # 1:1 物理匹配
-        for c in cands:
-            if c in sample_row:
-                return c
-        # 模糊匹配
-        for k in keys:
-            for c in cands:
-                if c.lower() in k.lower():
-                    return k
-        return None
+def _first_hit(keys, candidates):
+    key_norm = { _norm_key(k): k for k in keys }
+    for c in candidates:
+        cc = _norm_key(c)
+        if cc in key_norm:
+            return key_norm[cc]
+    return None
 
-    # --- 锁定您的物理表头（以口径模板为唯一真源） ---
-    col_shoe   = pick(["Batch", "批次", "全局批次号", "shoe", "靴号", "靴"])
-    col_result = pick(["Exhaustion", "结果", "Result", "r", "匹配项", "res"])
-    col_diff   = pick(["点差", "diff"])
-    col_rate   = pick(["变化率", "rate"])
-    col_mean   = pick(["均差", "mean"])
+def detect_columns(row0):
+    """
+    输入：row0（DictReader 读到的一行 dict）
+    输出：col_shoe, col_result, col_diff, col_rate, col_mean
+    目标：一次性解决你现有 CSV 的多种表头（含 2=变化率、M3=均差、Exhaustion=B/P/T、BB/PP 等）。
+    """
+    keys = list(row0.keys()) if isinstance(row0, dict) else []
+
+    # 靴号（若没有，允许退化到局号）
+    col_shoe = _first_hit(keys, ["靴", "靴号", "shoe", "Shoe", "本靴", "本靴靴号", "全局靴号", "本卷靴号"])
+    if col_shoe is None:
+        col_shoe = _first_hit(keys, ["局号", "hand", "Hand", "round", "Round"])
+    if col_shoe is None and keys:
+        col_shoe = keys[0]
+
+    # 结果列：你数据常见 Exhaustion（值为B/P/T）
+    col_result = _first_hit(keys, ["Exhaustion", "exhaustion", "结果", "result", "Result", "Outcome", "outcome"])
+
+    # 点差/变化率/均差（支持 2/M3）
+    col_diff = _first_hit(keys, ["点差", "diff", "Diff", "spread", "Spread", "delta", "Delta"])
+    col_rate = _first_hit(keys, ["变化率", "rate", "Rate", "roc", "ROC", "r", "R", "2"])
+    col_mean = _first_hit(keys, ["均差", "mean", "Mean", "avg", "Avg", "average", "Average", "M3", "m3"])
 
     return col_shoe, col_result, col_diff, col_rate, col_mean
 
-# ------------------------------------------------------------
-# 2) 批次级过滤（序列长度口径｜锁死）
-# ------------------------------------------------------------
+def _print_header_mapping_once(row0, cols):
+    """表头识别自证：只打印一次；绝不影响主流程。"""
+    global _HEADER_MAPPING_PRINTED
+    if _HEADER_MAPPING_PRINTED:
+        return
+    _HEADER_MAPPING_PRINTED = True
+
+    try:
+        sample_row = row0 if isinstance(row0, dict) else {}
+        keys = list(sample_row.keys())
+
+        # 清理表头键：去 BOM、去首尾空格（不修改原数据，只用于匹配）
+        norm_map = {}
+        for k in keys:
+            if isinstance(k, str):
+                kk = k.lstrip("\ufeff").strip()
+            else:
+                kk = k
+            norm_map[kk] = k
+        norm_keys = list(norm_map.keys())
+
+        def pick(cands):
+            # 1:1 物理匹配（优先原键）
+            for c in cands:
+                if c in sample_row:
+                    return c
+            # 1:1 物理匹配（清理后键）
+            for c in cands:
+                if c in norm_map:
+                    return norm_map[c]
+            # 模糊匹配（清理后键）
+            for k in norm_keys:
+                for c in cands:
+                    if isinstance(k, str) and isinstance(c, str) and (c.lower() in k.lower()):
+                        return norm_map.get(k, k)
+            return None
+
+        # cols 是 detect_columns 传入的结果；若为 None 则回退推断
+        col_shoe, col_result, col_diff, col_rate, col_mean = cols
+
+        # 兜底推断：只在缺失时补
+        if col_shoe is None:   col_shoe = pick(["局号", "hand", "Hand", "No", "no", "shoe", "靴号", "靴"])
+        if col_result is None: col_result = pick(["Exhaustion", "结果", "result", "Result", "r", "R"])
+        if col_diff is None:   col_diff = pick(["点差", "diff", "Diff", "spread", "Spread"])
+        if col_rate is None:   col_rate = pick(["变化率", "rate", "Rate", "2", "R2"])
+        if col_mean is None:   col_mean = pick(["均差", "mean", "Mean", "M3", "m3", "avg", "Avg"])
+
+        print("==================================================")
+        print("表头识别（自证｜一次性打印）")
+        print("靴 ->", col_shoe)
+        print("结果 ->", col_result)
+        print("点差 ->", col_diff)
+        print("变化率 ->", col_rate)
+        print("均差 ->", col_mean)
+
+        # 样例行：只展示前12个键
+        d = {}
+        show_keys = list(sample_row.keys())[:12]
+        for k in show_keys:
+            d[k] = sample_row.get(k)
+        print("样例行(原始):", d)
+        print("==================================================")
+    except Exception as e:
+        # 只要主流程能跑，自证失败不影响执行
+        print("⚠ 表头自证打印失败（不影响运行）:", str(e))
+
 def boot_filter(records):
     b_run, p_run, seen_all = _compute_max_runs_first9(records)
     if seen_all < 9:
@@ -498,6 +577,7 @@ def load_all_boots(csv_files):
 
         col_shoe, col_result, col_diff, col_rate, col_mean = detect_columns(rows[0])
 
+        _print_header_mapping_once(rows[0], (col_shoe, col_result, col_diff, col_rate, col_mean))
         for r in rows:
             shoe = r.get(col_shoe)
             if shoe is None:

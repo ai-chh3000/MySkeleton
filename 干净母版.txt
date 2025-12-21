@@ -17,6 +17,10 @@ import csv
 import os
 from collections import defaultdict
 
+# 表头自证：只打印一次
+_HEADER_MAPPING_PRINTED = False
+
+
 SCAN_MODE_LOCKED = "一次性扫描"
 MONITOR_ENABLE = 0  # 监测开关：0=关；1=开（动态监测/动态止损）
 # 多次决策（动态监测/动态止损｜锁死）：同一笔交易内，每一次【实际投放前】允许做一次“继续/STOP”决定；
@@ -110,6 +114,7 @@ def load_all_boots(csv_files):
 
         col_shoe, col_result, col_diff, col_rate, col_mean = detect_columns(rows[0])
 
+        _print_header_mapping_once(rows[0], (col_shoe, col_result, col_diff, col_rate, col_mean))
         for r in rows:
             shoe = r.get(col_shoe)
             if shoe is None:
@@ -222,55 +227,108 @@ def main():
 # ------------------------------------------------------------
 # 2) 列自动识别（固定）
 # ------------------------------------------------------------
-def detect_columns(sample_row):
-    # 自动识别：批次列/结果列/点差/变化率/均差
-    keys = list(sample_row.keys())
+def _norm_key(k):
+    return str(k).strip().lower() if k is not None else ""
 
-    # 清理表头键：去 BOM、去首尾空格（不修改原数据，只用于匹配）
-    norm_map = {}
-    for k in keys:
-        if isinstance(k, str):
-            kk = k.lstrip("\ufeff").strip()
-        else:
-            kk = k
-        norm_map[kk] = k
+def _first_hit(keys, candidates):
+    key_norm = { _norm_key(k): k for k in keys }
+    for c in candidates:
+        cc = _norm_key(c)
+        if cc in key_norm:
+            return key_norm[cc]
+    return None
 
-    def pick(cands):
-        # 1) 直接命中（含清理后的键）
-        for c in cands:
-            if c in sample_row:
-                return c
-            if c in norm_map:
-                return norm_map[c]
-        # 2) 模糊命中（大小写不敏感 + 包含）
-        for raw_k in keys:
-            ks = str(raw_k).lower()
-            for c in cands:
-                cs = str(c).lower()
-                if cs == ks or cs in ks:
-                    return raw_k
-        return None
+def detect_columns(row0):
+    """
+    输入：row0（DictReader 读到的一行 dict）
+    输出：col_shoe, col_result, col_diff, col_rate, col_mean
+    目标：一次性解决你现有 CSV 的多种表头（含 2=变化率、M3=均差、Exhaustion=B/P/T、BB/PP 等）。
+    """
+    keys = list(row0.keys()) if isinstance(row0, dict) else []
 
-    # --- 锁定物理表头（以口径模板为唯一真源） ---
-    col_shoe   = pick(["Batch", "批次", "全局批次号", "shoe", "靴号", "靴"])
-    col_result = pick(["Exhaustion", "结果", "Result", "r", "匹配项", "res"])
-    col_diff   = pick(["点差", "diff"])
-    col_rate   = pick(["变化率", "rate"])
-    col_mean   = pick(["均差", "mean"])
-
-    # 兜底：至少保证 shoe/result 不为 None（否则无法分批次与映射结果）
+    # 靴号（若没有，允许退化到局号）
+    col_shoe = _first_hit(keys, ["靴", "靴号", "shoe", "Shoe", "本靴", "本靴靴号", "全局靴号", "本卷靴号"])
+    if col_shoe is None:
+        col_shoe = _first_hit(keys, ["局号", "hand", "Hand", "round", "Round"])
     if col_shoe is None and keys:
         col_shoe = keys[0]
-    if col_result is None and len(keys) >= 2:
-        col_result = keys[1]
+
+    # 结果列：你数据常见 Exhaustion（值为B/P/T）
+    col_result = _first_hit(keys, ["Exhaustion", "exhaustion", "结果", "result", "Result", "Outcome", "outcome"])
+
+    # 点差/变化率/均差（支持 2/M3）
+    col_diff = _first_hit(keys, ["点差", "diff", "Diff", "spread", "Spread", "delta", "Delta"])
+    col_rate = _first_hit(keys, ["变化率", "rate", "Rate", "roc", "ROC", "r", "R", "2"])
+    col_mean = _first_hit(keys, ["均差", "mean", "Mean", "avg", "Avg", "average", "Average", "M3", "m3"])
 
     return col_shoe, col_result, col_diff, col_rate, col_mean
-# ------------------------------------------------------------
-# 3# ------------------------------------------------------------
-# 3) 批次级过滤（前 9 口｜序列长度口径｜锁死）
-# 规则：只看前 9 口（B/P/T 都计口数）；计算前 9 口内，B 与 P 的“最大序列长度”（T 不计入且不打断）
-# 若 B 最大序列长度 >=3 且 P 最大序列长度 >=3 -> 不可打批次
-# ------------------------------------------------------------
+
+def _print_header_mapping_once(row0, cols):
+    """表头识别自证：只打印一次；绝不影响主流程。"""
+    global _HEADER_MAPPING_PRINTED
+    if _HEADER_MAPPING_PRINTED:
+        return
+    _HEADER_MAPPING_PRINTED = True
+
+    try:
+        sample_row = row0 if isinstance(row0, dict) else {}
+        keys = list(sample_row.keys())
+
+        # 清理表头键：去 BOM、去首尾空格（不修改原数据，只用于匹配）
+        norm_map = {}
+        for k in keys:
+            if isinstance(k, str):
+                kk = k.lstrip("\ufeff").strip()
+            else:
+                kk = k
+            norm_map[kk] = k
+        norm_keys = list(norm_map.keys())
+
+        def pick(cands):
+            # 1:1 物理匹配（优先原键）
+            for c in cands:
+                if c in sample_row:
+                    return c
+            # 1:1 物理匹配（清理后键）
+            for c in cands:
+                if c in norm_map:
+                    return norm_map[c]
+            # 模糊匹配（清理后键）
+            for k in norm_keys:
+                for c in cands:
+                    if isinstance(k, str) and isinstance(c, str) and (c.lower() in k.lower()):
+                        return norm_map.get(k, k)
+            return None
+
+        # cols 是 detect_columns 传入的结果；若为 None 则回退推断
+        col_shoe, col_result, col_diff, col_rate, col_mean = cols
+
+        # 兜底推断：只在缺失时补
+        if col_shoe is None:   col_shoe = pick(["局号", "hand", "Hand", "No", "no", "shoe", "靴号", "靴"])
+        if col_result is None: col_result = pick(["Exhaustion", "结果", "result", "Result", "r", "R"])
+        if col_diff is None:   col_diff = pick(["点差", "diff", "Diff", "spread", "Spread"])
+        if col_rate is None:   col_rate = pick(["变化率", "rate", "Rate", "2", "R2"])
+        if col_mean is None:   col_mean = pick(["均差", "mean", "Mean", "M3", "m3", "avg", "Avg"])
+
+        print("==================================================")
+        print("表头识别（自证｜一次性打印）")
+        print("靴 ->", col_shoe)
+        print("结果 ->", col_result)
+        print("点差 ->", col_diff)
+        print("变化率 ->", col_rate)
+        print("均差 ->", col_mean)
+
+        # 样例行：只展示前12个键
+        d = {}
+        show_keys = list(sample_row.keys())[:12]
+        for k in show_keys:
+            d[k] = sample_row.get(k)
+        print("样例行(原始):", d)
+        print("==================================================")
+    except Exception as e:
+        # 只要主流程能跑，自证失败不影响执行
+        print("⚠ 表头自证打印失败（不影响运行）:", str(e))
+
 def classify_boot_first9(records):
     seen = 0
     max_len = {"B": 0, "P": 0}
