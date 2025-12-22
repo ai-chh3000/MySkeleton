@@ -28,14 +28,14 @@ MONITOR_ENABLE = 0  # 监测开关：0=关；1=开（动态监测/动态止损�
 VERIFY_SPLIT_ENABLE = 0  # 验真分拆开关：0=关；1=开（文件名排序前 50%/后 50%）
 
 
-# 连续统计（二指标二连变化｜锁死）
-# - 只做“事后统计”：只能基于【投放前快照列表】做分布/转移；禁止回读 records 做二连对比
-# - 决策口基准：STOP/继续 的决策只能使用“当前投放前快照 + 历史快照”；严禁读取下一次快照决定这一注
-# - 观测目标：用于 STOP 候选，不得参与激活判定（激活层必须可独立运行）
+# 注位快照统计（L2/L3/L4 各注位快照｜锁死）
+# - 只做“事后统计”：仅基于【投放前快照列表】做分布；禁止回读 records；禁止“相邻对比”类统计
+# - 取值口：每次【实际投放前】快照（含状态 T 导致同注重复投放前的每一次）
+# - 观测目标：用于 STOP 画像候选，不得参与激活判定（激活层必须可独立运行）
 CONT_STATS_ENABLE = 1
 CONT_N_MAX = 12          # 只展开前 N 次实际投放（含状态 T 重复投放）；其余合并到 N+ 
-CONT_MIN_COUNT = 500     # 低于该次数的格子不参与 Top 榜，避免噪声
-CONT_TOPK = 10           # 每个位次最多输出 TopK 条转移
+CONT_MIN_COUNT = 500     # 低于该次数的格子不参与输出，避免噪声
+CONT_TOPK = 10           # 每个位次最多输出 TopK（桶数很少时会输出全桶）
 
 
 # ============================================================
@@ -374,102 +374,110 @@ def classify_boot_first9(records):
 
 
 # ------------------------------------------------------------
-# 4) 连续统计（二指标二连变化｜事后统计模块）
-# - 状态1：(|点差|桶, 变化率监测桶)
-# - 状态2：(|点差|桶, 均差桶)
-# 注：只读快照，不回读 records；快照来自“每次实际投放前”
 # ------------------------------------------------------------
-def _bucket_abs_diff(diff):
+# 4) 注位快照统计（L2/L3/L4｜事后统计模块）
+# - 只读快照，不回读 records
+# - 仅做“各注位快照分桶分布”（不做相邻对比）
+# - 用途：用于 STOP 画像候选；不得参与激活判定
+#
+# 分桶口径（锁死）：
+# 1) 变化率：减速(rate<0) / 加速(0<=rate<2) / 极值(rate>=2) / 无效
+# 2) |均差|：<3 / ≥3 / 无效
+# 3) |点差|：主分布=1..9；纠错计数=|diff|=0 与 9+ 合并（不进入1..9分布）
+# ------------------------------------------------------------
+def _bucket_abs_diff_monitor(diff):
     try:
         v = abs(int(diff))
     except Exception:
         v = 0
-    if v < 0:
-        v = 0
-    if v > 9:
-        v = 9
-    return v
+
+    if v == 0 or v >= 10:
+        return "纠错"  # |diff|=0 与 9+ 合并计数
+    if 1 <= v <= 9:
+        return str(v)
+    return "纠错"
+
 
 def _bucket_rate_monitor(rate):
-    # 监测阈值：<0 / [0,2) / >=2 / 无效
     if rate is None:
-        return "R无效"
+        return "无效"
     try:
         v = float(rate)
     except Exception:
-        return "R无效"
+        return "无效"
     if v < 0:
-        return "R<0"
+        return "减速"
     if v < 2:
-        return "R[0,2)"
-    return "R>=2"
+        return "加速"
+    return "极值"
 
-def _bucket_mean_monitor(mean):
-    # 均差桶：mean=0 单列；|mean|<3；|mean|>=3；无效
+
+def _bucket_abs_mean_monitor(mean):
     if mean is None:
-        return "M无效"
+        return "无效"
     try:
         v = float(mean)
     except Exception:
-        return "M无效"
-    if v == 0:
-        return "M0"
+        return "无效"
     if abs(v) >= 3:
-        return "M>=3"
-    return "M<3"
+        return "≥3"
+    return "<3"
+
 
 def init_cont_stats():
     return {
         "rate": defaultdict(lambda: {"cnt": 0, "bust": 0}),
         "mean": defaultdict(lambda: {"cnt": 0, "bust": 0}),
-        "meta": {"snap_total": 0, "boot_with_snap": 0},
+        "diff": defaultdict(lambda: {"cnt": 0, "bust": 0}),
+        "meta": {"snap_total": 0, "boot_with_snap": 0, "MEAN_INVALID_BUG": 0},
     }
+
 
 def update_cont_stats(cont_stats, snapshots, bust_flag):
     # snapshots: list[dict]，每条至少包含 bet_no/diff/rate/mean
-    if not snapshots or len(snapshots) < 2:
+    if not snapshots:
         return
-    # 只按出现顺序处理；若缺 bet_no 也不影响二连
+
     cont_stats["meta"]["boot_with_snap"] += 1
     cont_stats["meta"]["snap_total"] += len(snapshots)
 
-    # 限制展开长度：前 N，超过的归入 N+（仅用于输出时聚合；统计仍按原序列计）
-    for i in range(1, len(snapshots)):
-        prev = snapshots[i - 1]
-        cur = snapshots[i]
-
-        n = safe_int(cur.get("bet_no", i + 1), i + 1)
+    for i, s in enumerate(snapshots, 1):
+        n = safe_int(s.get("bet_no", i), i)
         n_label = n if n <= CONT_N_MAX else f"{CONT_N_MAX}+"
 
-        prev_state_rate = (_bucket_abs_diff(prev.get("diff", 0)), _bucket_rate_monitor(prev.get("rate")))
-        cur_state_rate = (_bucket_abs_diff(cur.get("diff", 0)), _bucket_rate_monitor(cur.get("rate")))
-        key_rate = (n_label, prev_state_rate, cur_state_rate)
+        d_bucket = _bucket_abs_diff_monitor(s.get("diff", 0))
+        r_bucket = _bucket_rate_monitor(s.get("rate", None))
+        m_bucket = _bucket_abs_mean_monitor(s.get("mean", None))
 
-        prev_state_mean = (_bucket_abs_diff(prev.get("diff", 0)), _bucket_mean_monitor(prev.get("mean")))
-        cur_state_mean = (_bucket_abs_diff(cur.get("diff", 0)), _bucket_mean_monitor(cur.get("mean")))
-        key_mean = (n_label, prev_state_mean, cur_state_mean)
+        # 纠错：mean 无效计入 MEAN_INVALID_BUG
+        if m_bucket == "无效":
+            cont_stats["meta"]["MEAN_INVALID_BUG"] += 1
 
-        cont_stats["rate"][key_rate]["cnt"] += 1
-        cont_stats["mean"][key_mean]["cnt"] += 1
+        k_rate = (n_label, r_bucket)
+        k_mean = (n_label, m_bucket)
+        k_diff = (n_label, d_bucket)
+
+        cont_stats["rate"][k_rate]["cnt"] += 1
+        cont_stats["mean"][k_mean]["cnt"] += 1
+        cont_stats["diff"][k_diff]["cnt"] += 1
         if bust_flag:
-            cont_stats["rate"][key_rate]["bust"] += 1
-            cont_stats["mean"][key_mean]["bust"] += 1
+            cont_stats["rate"][k_rate]["bust"] += 1
+            cont_stats["mean"][k_mean]["bust"] += 1
+            cont_stats["diff"][k_diff]["bust"] += 1
 
-def _print_cont_block_one(title, bucket_dict):
+
+def _print_dist_block(title, bucket_dict, ordered_buckets):
     print()
     print("------------------------------------------------------------")
     print(title)
-    print("（二指标二连变化｜仅事后统计｜只读快照｜用于 STOP 候选）")
+    print("（注位快照分桶分布｜仅事后统计｜只读快照｜用于 STOP 画像候选）")
     print("------------------------------------------------------------")
 
-    # 按投放位分组输出 TopK
-    # key: (n_label, prev_state, cur_state)
     groups = defaultdict(list)
     for k, v in bucket_dict.items():
         n_label = k[0]
         groups[n_label].append((k, v))
 
-    # 排序投放位：数字在前，N+ 在后
     def n_sort(x):
         if isinstance(x, int):
             return (0, x)
@@ -481,17 +489,29 @@ def _print_cont_block_one(title, bucket_dict):
         items = [it for it in items if it[1]["cnt"] >= CONT_MIN_COUNT]
         if not items:
             continue
-        # 按阈值击穿率降序，其次按次数降序
-        items.sort(key=lambda it: ((it[1]["bust"] / it[1]["cnt"]) if it[1]["cnt"] else 0, it[1]["cnt"]), reverse=True)
-        print(f"[第{n_label}次投放] Top{CONT_TOPK}（次数>= {CONT_MIN_COUNT}）")
-        for k, v in items[:CONT_TOPK]:
-            _, prev_state, cur_state = k
+
+        # 固定桶顺序输出（便于人工比对）
+        m = {it[0][1]: it[1] for it in items}
+        print(f"[第{n_label}次投放]（次数>= {CONT_MIN_COUNT}）")
+        for b in ordered_buckets:
+            v = m.get(b)
+            if not v:
+                continue
             cnt = v["cnt"]
             bust = v["bust"]
             er = (bust / cnt * 100) if cnt else 0.0
-            pd, pr = prev_state
-            cd, cr = cur_state
-            print(f"  ({pd},{pr})->({cd},{cr})  次数={cnt}  阈值击穿={bust}  阈值击穿率={er:.2f}%")
+            print(f"  {b}  次数={cnt}  阈值击穿={bust}  阈值击穿率={er:.2f}%")
+
+        # 若存在未列入 ordered_buckets 的桶（理论不应有），追加输出
+        extra = [bk for bk in m.keys() if bk not in ordered_buckets]
+        if extra:
+            for b in sorted(extra):
+                v = m[b]
+                cnt = v["cnt"]
+                bust = v["bust"]
+                er = (bust / cnt * 100) if cnt else 0.0
+                print(f"  {b}  次数={cnt}  阈值击穿={bust}  阈值击穿率={er:.2f}%")
+
 
 def print_cont_stats(cont_stats):
     if not CONT_STATS_ENABLE:
@@ -501,10 +521,15 @@ def print_cont_stats(cont_stats):
     if cont_stats["meta"]["boot_with_snap"] <= 0:
         return
 
-    _print_cont_block_one("二指标二连变化：(|点差|桶, 变化率监测桶)", cont_stats["rate"])
-    _print_cont_block_one("二指标二连变化：(|点差|桶, 均差桶)", cont_stats["mean"])
+    # 固定自证输出
+    print()
+    print("------------------------------------------------------------")
+    print("自证项：MEAN_INVALID_BUG（目标=0） =", cont_stats["meta"].get("MEAN_INVALID_BUG", 0))
+    print("------------------------------------------------------------")
 
-
+    _print_dist_block("注位快照：变化率分桶（减速/加速/极值/无效）", cont_stats["rate"], ["减速", "加速", "极值", "无效"])
+    _print_dist_block("注位快照：|均差|分桶（<3/≥3/无效）", cont_stats["mean"], ["<3", "≥3", "无效"])
+    _print_dist_block("注位快照：|点差|分布（1..9；纠错=0与9+合并）", cont_stats["diff"], [str(i) for i in range(1, 10)] + ["纠错"])
 
 # ------------------------------------------------------------
 # 5) 单批次策略入口（唯一入口｜严格零未来）

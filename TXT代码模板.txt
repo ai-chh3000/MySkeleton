@@ -150,16 +150,17 @@ CONT_MAX_BET_N = 12  # [cite: 15]
 CONT_MIN_SAMPLES = 500  # [cite: 15]
 CONT_TOPK = 20  # [cite: 15]
 
+
 def _abs_diff_bucket(diff):
+    """L2/L3/L4 注位快照：主分布 |diff|=1..9；纠错计数：|diff|=0 与 9+ 合并（不进入1..9）。"""
     try:
-        d = abs(int(diff))  # [cite: 16]
+        d = abs(int(diff))
     except Exception:
-        d = 0  # [cite: 16]
-    if d < 0:
-        d = 0  # [cite: 16]
-    if d > 9:
-        d = 9  # [cite: 16]
-    return d  # 0..9（输出时通常只关注 1..9）  # [cite: 16]
+        d = 0
+    if 1 <= d <= 9:
+        return str(d)  # "1".."9"
+    return "纠错(0/9+)"
+
 
 # 变化率：激活阈值（三档｜锁死）  # [cite: 17]
 def _rate_entry_bucket(rate):
@@ -178,47 +179,86 @@ def _rate_entry_bucket(rate):
     return "其他"  # [cite: 17]
 
 # 变化率：监测阈值（三档｜锁死）  # [cite: 18]
+
 def _rate_monitor_bucket(rate):
+    """L2/L3/L4 注位快照变化率分桶（中文桶名锁死）。"""
     if rate is None:
-        return "无效"  # [cite: 18]
+        return "无效"
     try:
-        r = float(rate)  # [cite: 18]
+        r = float(rate)
     except Exception:
-        return "无效"  # [cite: 18]
+        return "无效"
     if r < 0:
-        return "<0"  # [cite: 18]
+        return "减速"
     if 0 <= r < 2:
-        return "[0,2)"  # [cite: 18]
-    return ">=2"  # [cite: 18]
+        return "加速"
+    return "极值"
+
 
 # 均差：监测分桶（两类 + 0 单列｜锁死）  # [cite: 19]
-def _mean_bucket(mean):
-    if mean is None:
-        return "无效"  # [cite: 19]
-    try:
-        m = float(mean)  # [cite: 19]
-    except Exception:
-        return "无效"  # [cite: 19]
-    if m == 0:
-        return "0"  # [cite: 19]
-    if abs(m) >= 3:
-        return "|mean|>=3"  # [cite: 19]
-    return "|mean|<3"  # [cite: 19]
 
-def _mean_flip_valid(prev_mean, curr_mean):
-    # 有效转向（锁死）：符号翻转且两侧 |mean|>=1  # [cite: 20]
-    if prev_mean is None or curr_mean is None:
-        return False  # [cite: 20]
+def _mean_bucket(mean):
+    """L2/L3/L4 注位快照均差绝对值分桶（<3 / ≥3；无效单列用于纠错计数）。"""
+    if mean is None:
+        return "无效"
     try:
-        a = float(prev_mean)  # [cite: 20]
-        b = float(curr_mean)  # [cite: 20]
+        m = abs(float(mean))
     except Exception:
-        return False  # [cite: 20]
-    if a == 0 or b == 0:
-        return False  # [cite: 20]
-    if abs(a) < 1 or abs(b) < 1:
-        return False  # [cite: 20]
-    return (a > 0 and b < 0) or (a < 0 and b > 0)  # [cite: 20]
+        return "无效"
+    if m < 3:
+        return "<3"
+    return "≥3"
+
+def _l1_abs_diff_bucket(diff):
+    """L1 投放点点差分布：|diff|=0..9 + 9+（9+单列）。"""
+    try:
+        d = abs(int(diff))
+    except Exception:
+        d = 0
+    if d >= 10:
+        return "9+"
+    return str(d)  # "0".."9"
+
+def _l1_rate_bucket(rate):
+    """L1 投放点变化率分桶（中文桶名锁死）。"""
+    if rate is None:
+        return "无效"
+    try:
+        r = float(rate)
+    except Exception:
+        return "无效"
+    if r > -2:
+        return "前小"
+    if -3 < r <= -2:
+        return "前大"
+    return "极值"
+
+def _l1_mean_bucket(diff, mean):
+    """L1 投放点均差分桶：有效同向/有效反向/中轴；mean无效返回(None, True)"""
+    if mean is None:
+        return None, True
+    try:
+        m = float(mean)
+    except Exception:
+        return None, True
+    try:
+        d = float(diff)
+    except Exception:
+        d = 0.0
+
+    # diff=0 强制中轴
+    if d == 0:
+        return "中轴", False
+
+    # mean=0 / |mean|<1 归中轴
+    if abs(m) < 1:
+        return "中轴", False
+
+    # |mean|>=1：按符号判同向/反向
+    same = (m > 0 and d > 0) or (m < 0 and d < 0)
+    return ("有效同向" if same else "有效反向"), False
+
+
 
 def _init_cont_agg():
     return {
@@ -454,6 +494,8 @@ def boot_filter(records):
 def run_strategy_on_boot(records):
     # 1. 物理槽位初始化
     snapshots = []  # 存放“实际投放前”的快照列表
+    star_snap = None  # 投放点当行快照（L1）
+
     entry, match, mismatch, exhaustion = 0, 0, 0, 0
     profit = 0.0
 
@@ -470,6 +512,15 @@ def run_strategy_on_boot(records):
         is_structure_active = (idx >= 9 and rr in ("B", "P"))
 
         if is_structure_active:
+            # --- 投放点当行快照（L1）---
+            star_snap = {
+                'idx': idx,
+                'r': rr,
+                'diff': r.get('diff'),
+                'rate': r.get('rate'),
+                'mean': r.get('mean'),
+            }
+
             # --- B层：神谕审计 (Oracle Audit) ---
             # 物理职能：仅对已激活的结构执行“通过/不通过”判定
             # 严禁在此生成任何下注信号。
@@ -552,6 +603,7 @@ def run_strategy_on_boot(records):
         "exhaustion": exhaustion,
         "profit": profit,
         "snapshots": snapshots, # 必须返回，用于 TopK 归因
+        "star_snap": star_snap,  # 投放点当行快照（用于L1统计）
         "trade_bust": 1 if exhaustion > 0 else 0
     }  # [cite: 26, 32]
 
@@ -617,6 +669,17 @@ def _run_report(csv_files, title):
     total_exhaustion = 0
     total_profit = 0.0
 
+    # ------------------------------------------------------------
+    # L1 锁死标题统计（投放点当行）
+    # ------------------------------------------------------------
+    l1_diff_dist = defaultdict(int)  # key: '0'..'9','9+'
+    l1_rate_dist = defaultdict(int)  # key: 前小/前大/极值/无效
+    l1_mean_dist = defaultdict(int)  # key: 有效同向/有效反向/中轴
+    STAR_ON_T = 0
+    STAR_DIFF0_AND_R_IN_BP = 0
+    MEAN_INVALID_BUG = 0
+
+
     cont_agg = _init_cont_agg() if CONT_STATS_ENABLE else None
 
     # ------------------------------------------------------------
@@ -660,6 +723,29 @@ def _run_report(csv_files, title):
         playable_boots += 1
         out = run_strategy_on_boot(rec)
 
+        # L1 投放点当行统计：仅使用 star_snap（取值口锁死）
+        star = out.get("star_snap")
+        if isinstance(star, dict):
+            sr = star.get("r")
+            sd = star.get("diff")
+            srate = star.get("rate")
+            smean = star.get("mean")
+
+            if sr == "T":
+                STAR_ON_T += 1
+            elif sr in ("B", "P"):
+                if safe_int(sd, 0) == 0:
+                    STAR_DIFF0_AND_R_IN_BP += 1
+
+                l1_diff_dist[_l1_abs_diff_bucket(sd)] += 1
+                l1_rate_dist[_l1_rate_bucket(srate)] += 1
+
+                mb, inv = _l1_mean_bucket(sd, smean)
+                if inv:
+                    MEAN_INVALID_BUG += 1
+                else:
+                    l1_mean_dist[mb] += 1
+
         total_entry += int(out.get("entry", 0))
         total_match += int(out.get("match", 0))
         total_mismatch += int(out.get("mismatch", 0))
@@ -699,6 +785,29 @@ def _run_report(csv_files, title):
         print(f"阈值击穿率  : {exhaustion_rate:.4f}%")
         print(f"单次平均增益: {total_profit / total_entry:.6f}")
     print("总净值增益  :", round(total_profit, 2))
+
+    print()
+    print("------------------------------------------------------------")
+    print("[锁死标题] L1点差分布（投放点｜|点差|=0..9 + 9+）:")
+    for k in [str(i) for i in range(0, 10)] + ["9+"]:
+        if k in l1_diff_dist:
+            print(f"  {k}: {l1_diff_dist[k]}")
+    print("------------------------------------------------------------")
+    print("[锁死标题] L1变化率分桶（投放点｜前小/前大/极值/无效）:")
+    for k in ["前小", "前大", "极值", "无效"]:
+        if k in l1_rate_dist:
+            print(f"  {k}: {l1_rate_dist[k]}")
+    print("------------------------------------------------------------")
+    print("[锁死标题] L1均差分桶（投放点｜有效同向/有效反向/中轴）:")
+    for k in ["有效同向", "有效反向", "中轴"]:
+        if k in l1_mean_dist:
+            print(f"  {k}: {l1_mean_dist[k]}")
+    print("------------------------------------------------------------")
+    print("自证项（每次跑必出）:")
+    print("  STAR_ON_T:", STAR_ON_T)
+    print("  STAR_DIFF0_AND_R_IN_BP:", STAR_DIFF0_AND_R_IN_BP)
+    print("  MEAN_INVALID_BUG:", MEAN_INVALID_BUG)
+
 
     if cont_agg is not None:
         print()
