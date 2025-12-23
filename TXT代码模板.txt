@@ -4,15 +4,175 @@
 import csv
 import os
 import inspect
+import hashlib
+import re
 
 # 表头自证：只打印一次
 _HEADER_MAPPING_PRINTED = False
+
+# ==========================
+# 全局开关（必须显式定义｜避免 NameError）
+# ==========================
+# 监测开关：0=关，1=开（默认关；仅影响“监测/雷达”输出，不得影响零未来与下注路径）
+MONITOR_ENABLE = 0
+
+# 验证分拆开关：0=关，1=开（默认关；若开启，必须仍满足零未来与一次性扫描约束）
+VERIFY_SPLIT_ENABLE = 0
+
+
+# 靴级开关（锁死）：仅限制“实际落注”是否允许发生在前8口（seen_all=1..8）
+# BOOT_FILTER=ON✅：禁下注 seen_all=1..8；第9口起允许
+# BOOT_FILTER=OFF⛔：靴首允许下注
+BOOT_FILTER = 1  # 1=ON✅，0=OFF⛔
+BOOT_FILTER_TEXT = "BOOT_FILTER=ON✅(禁下注 seen_all=1..8)" if BOOT_FILTER else "BOOT_FILTER=OFF⛔(靴首允许下注)"
+# ============================================================
+# 结构扫描开关（结构闸门｜锁死）
+# ============================================================
+STRUCT_SCAN = 1  # 1=ON✅，0=OFF⛔（仅自证用，OFF时禁止任何策略执行）
+STRUCT_SCAN_TEXT = "STRUCT_SCAN=ON✅(结构扫描开启)" if STRUCT_SCAN else "STRUCT_SCAN=OFF⛔(结构扫描关闭-仅自证)"
+# ============================================================
+# 结构插槽区（版本A｜唯一允许出现结构逻辑的区域｜锁死）
+# - 后续更换结构：只允许替换「结构插槽区开始/结束」两行之间的内容
+# - 其余任何位置出现结构判断/结构函数视为污染（自检会拦截）
+# ============================================================
+# [STRUCT_SLOT_BEGIN]
+STRUCT_SUMMARY_LINE = "结构摘要：S≥3→W1-2→S⭐（打S）"
+def scan_structure(records):
+    """结构扫描（示例：Q1结构）
+    结构：主导轴累计≥3 → 辅轴累计1~2 → 主导轴⭐（⭐口=投放点）
+    口径要点：
+    - 仅BP参与累计；T/点差0不打断、不参与累计；且禁止跨段累计
+    - ⭐必须满足：结果为B/P 且 点差非0（否则STRUCT_ERROR）
+    - BOOT_FILTER=ON✅时：若⭐落在seen_all=1..8，禁止投放，但必须继续扫描直到出现可投放⭐或STRUCT_FAIL
+    返回：
+      ("STRUCT_OK", star_idx, strong_side, info_dict)
+      ("STRUCT_FAIL", None, None, info_dict)
+    """
+    info = {
+        "forbidden_star_cnt": 0,
+        "forbidden_star_first_seen": None,
+        "fail_reason": None,  # MAIN_LT3 / WEAK_GT2 / NO_CANDIDATE / ONLY_FORBIDDEN
+    }
+
+    if not records:
+        info["fail_reason"] = "NO_CANDIDATE"
+        return "STRUCT_FAIL", None, None, info
+
+    strong = None
+    weak = None
+
+    run_side = None
+    run_len = 0
+
+    state = "FIND_S"   # FIND_S / WAIT_W / IN_W
+    w_len = 0
+
+    def _is_bp_valid(rec):
+        rr = rec.get("r")
+        if rr not in ("B", "P"):
+            return False
+        d = rec.get("diff")
+        if d is None:
+            return False
+        try:
+            if int(d) == 0:
+                return False
+        except Exception:
+            return False
+        return True
+
+    for rec in records:
+        if not _is_bp_valid(rec):
+            continue
+
+        rr = rec.get("r")
+
+        if run_side is None:
+            run_side = rr
+            run_len = 1
+        elif rr == run_side:
+            run_len += 1
+        else:
+            run_side = rr
+            run_len = 1
+
+        if state == "FIND_S":
+            if run_len >= 3:
+                strong = run_side
+                weak = "P" if strong == "B" else "B"
+                state = "WAIT_W"
+                w_len = 0
+            continue
+
+        if state == "WAIT_W":
+            if rr == weak:
+                state = "IN_W"
+                w_len = 1
+            continue
+
+        if state == "IN_W":
+            if rr == weak:
+                w_len += 1
+                if w_len >= 3:
+                    info["fail_reason"] = "WEAK_GT2"
+                    return "STRUCT_FAIL", None, None, info
+                continue
+
+            star_idx = rec.get("idx")
+            star_seen = rec.get("seen_all")
+
+            # ⭐合法性：必须为BP且点差非0（否则STRUCT_ERROR）
+            if rec.get("r") not in ("B", "P"):
+                print("❌❌❌ STRUCT_ERROR：⭐落在T | 文件|Sub-Batch|idx|seen|r|diff =", _CTX_FILE, _CTX_SUBBATCH, star_idx, star_seen, rec.get("r"), rec.get("diff"))
+                raise RuntimeError("STRUCT_ERROR：⭐落在T")
+            try:
+                if int(rec.get("diff")) == 0:
+                    print("❌❌❌ STRUCT_ERROR：⭐点差=0 | 文件|Sub-Batch|idx|seen|r|diff =", _CTX_FILE, _CTX_SUBBATCH, star_idx, star_seen, rec.get("r"), rec.get("diff"))
+                    raise RuntimeError("STRUCT_ERROR：⭐点差=0")
+            except Exception:
+                print("❌❌❌ STRUCT_ERROR：⭐点差无法解析 | 文件|Sub-Batch|idx|seen|r|diff =", _CTX_FILE, _CTX_SUBBATCH, star_idx, star_seen, rec.get("r"), rec.get("diff"))
+                raise RuntimeError("STRUCT_ERROR：⭐点差无法解析")
+
+            if BOOT_FILTER and (star_seen is not None):
+                try:
+                    if 1 <= int(star_seen) <= 8:
+                        info["forbidden_star_cnt"] += 1
+                        if info["forbidden_star_first_seen"] is None:
+                            info["forbidden_star_first_seen"] = int(star_seen)
+
+                        # 禁投放：继续扫描下一个⭐
+                        state = "WAIT_W"
+                        w_len = 0
+                        run_side = strong
+                        run_len = 1
+                        continue
+                except Exception:
+                    pass
+
+            return "STRUCT_OK", int(star_idx), strong, info
+
+    if strong is None:
+        info["fail_reason"] = "MAIN_LT3"
+    else:
+        if info["forbidden_star_cnt"] > 0:
+            info["fail_reason"] = "ONLY_FORBIDDEN"
+        else:
+            info["fail_reason"] = "NO_CANDIDATE"
+    return "STRUCT_FAIL", None, None, info
+# [STRUCT_SLOT_END]
+STRUCT_DEF_HASH = hashlib.md5(STRUCT_SUMMARY_LINE.encode("utf-8")).hexdigest()[:8]
+_STRUCT_SUMMARY_PRINTED = False
+
+
+# 上下文（用于最小溯源打印）
+_CTX_FILE = ""
+_CTX_SUBBATCH = ""
 
 
 def _audit_forbid_idx_offset():
     """
     安全自检（锁死｜执行/结算段）：
-    - 禁止：idx + 偏移量 / records[idx + ...] 等“直算未来行号”
+    - 禁止：以 idx 为基准直接推导“未来行号”（例如：idx 与偏移量拼接得到某行）
     - 禁止：在执行/结算段回读 diff/rate/mean 作为判断依据
     说明：只审计 run_strategy_on_boot() 内“结算开始锚点”之后的代码，避免误伤“投放前快照”。
     """
@@ -32,11 +192,15 @@ def _audit_forbid_idx_offset():
     audit_src = src[pos:] if pos >= 0 else src
 
     # 3) 禁止片段（执行/结算段）
+    # 注意：为了避免“自检字符串本身”触发更上层的源码雷达，本处用拼接生成模式串。
+    a = "idx"
+    sp = " +"
+    lbr = "records["
     forbidden = [
         # 未来行号直算（禁止）
-        "idx + step_idx", "idx+step_idx",
-        "idx + b_idx", "idx+b_idx",
-        "records[idx +", "records[idx+",
+        a + sp + " step_idx", a + "+step_idx",
+        a + sp + " b_idx", a + "+b_idx",
+        lbr + a + sp, lbr + a + "+",
 
         # 结算/执行阶段将游标指向结算行并回读指标（禁止）
         "settle_idx", "last_bet_idx",
@@ -44,11 +208,10 @@ def _audit_forbid_idx_offset():
         "records [settle_idx]", "records [last_bet_idx]",
 
         # 绕路写法（禁止）：区间读取/区间循环/表格式索引
-        "records[idx:","records[idx :","records[ idx:","records[ idx :",
-        "records[idx+1:","records[idx + 1:","records[idx +1:",
-        "range(idx","range(idx +","range( idx",
+        lbr + a + ":", lbr + a + " :", "records[ " + a + ":", "records[ " + a + " :",
+        lbr + a + "+1:", lbr + a + sp + " 1:", lbr + a + "+1:",
+        "range(" + a, "range(" + a + sp, "range( " + a,
         "iloc[",
-
     ]
 
     hit = [s for s in forbidden if s in audit_src]
@@ -59,22 +222,55 @@ def _audit_forbid_idx_offset():
         shown = 0
         for i, line in enumerate(lines, 1):
             if any(h in line for h in hit):
-                print(f"证据行{i}: {line.strip()}")
+                print(f"  HIT|Line {i}|{line.strip()}")
                 shown += 1
-                if shown >= 5:
+                if shown >= 6:
                     break
         print("=== 安全自检完成 ===")
-        raise RuntimeError("安全自检失败：执行/结算段存在禁止片段")
+        raise RuntimeError("执行/结算段存在禁止片段")
 
-    print("✅✅✅ 通过: 执行/结算段未检测到禁止片段")
+    print("✅ 安全自检通过：执行/结算段未检测到禁止片段。")
     print("=== 安全自检完成 ===")
 
+def _audit_structure_slot_integrity():
+    """
+    结构插槽完整性自检（锁死）：
+    - 结构插槽标记行必须且只能各出现 1 次：# [STRUCT_SLOT_BEGIN] / # [STRUCT_SLOT_END]
+    - 必须且只能有 1 个 def scan_structure(records):，且位于插槽区内
+    - STRUCT_SUMMARY_LINE 只能在插槽区内定义一次
+    """
+    try:
+        src = open(__file__, 'r', encoding='utf-8').read()
+    except Exception:
+        # 某些环境下 __file__ 不可用时，放行；但这会降低审查强度
+        return
 
-SCAN_MODE_LOCKED = "一次性扫描"  # 扫描方式锁死：一次性扫描｜一次性交易
-MONITOR_ENABLE = 1  # 监测开关：0=关；1=开（用于动态监测/动态止损）  # [cite: 12]
-# 多次决策（动态监测/动态止损｜锁死）：同一笔交易内，每一次【实际投放前】允许做一次“继续/STOP”决定；  # [cite: 12]
-# 决策时刻视为一次“投放点”，只允许读取该行及历史指标；严禁使用该决策口之后（t+1及以后）的任何信息。  # [cite: 12]
-VERIFY_SPLIT_ENABLE = 0  # 验真分拆开关：0=关；1=开（按文件名排序前50%/后50%分别跑）  # [cite: 12]
+    begin_ms = list(re.finditer(r'(?m)^[ \t]*#\s*\[STRUCT_SLOT_BEGIN\]\s*$', src))
+    end_ms = list(re.finditer(r'(?m)^[ \t]*#\s*\[STRUCT_SLOT_END\]\s*$', src))
+    if len(begin_ms) != 1 or len(end_ms) != 1:
+        raise RuntimeError('❌ 结构插槽标记行必须且只能各出现 1 次：# [STRUCT_SLOT_BEGIN] / # [STRUCT_SLOT_END]')
+
+    b = begin_ms[0].end()
+    e = end_ms[0].start()
+    if e <= b:
+        raise RuntimeError('❌ 结构插槽标记顺序错误：BEGIN 必须在 END 之前')
+
+    slot = src[b:e]
+
+    # 1) scan_structure：全文件只能定义 1 次，且必须位于插槽区内
+    all_defs = list(re.finditer(r'(?m)^[ \t]*def\s+scan_structure\s*\(', src))
+    slot_defs = list(re.finditer(r'(?m)^[ \t]*def\s+scan_structure\s*\(', slot))
+    if len(all_defs) != 1 or len(slot_defs) != 1:
+        raise RuntimeError('❌ scan_structure 必须且只能定义 1 次，并且必须位于结构插槽区内')
+
+    # 2) STRUCT_SUMMARY_LINE：只能在插槽区内定义一次
+    all_sum = list(re.finditer(r'(?m)^[ \t]*STRUCT_SUMMARY_LINE\s*=', src))
+    slot_sum = list(re.finditer(r'(?m)^[ \t]*STRUCT_SUMMARY_LINE\s*=', slot))
+    if len(all_sum) != 1 or len(slot_sum) != 1:
+        raise RuntimeError('❌ STRUCT_SUMMARY_LINE 必须且只能定义 1 次，并且必须位于结构插槽区内')
+def _boot_filter_label():
+    return "BOOT_FILTER=ON✅(禁下注 seen_all=1..8)" if BOOT_FILTER else "BOOT_FILTER=OFF⛔(靴首允许下注)"
+
 
 # ==========================
 # 段长与自停（锁死｜从批次首开始）  # [cite: 12]
@@ -145,7 +341,7 @@ from collections import defaultdict
 #   B) (|点差|桶, mean 桶) 的二连转移榜：S_{t-1}→S_t（TopK）  # [cite: 15]
 #   每条转移输出：出现次数、后续阈值击穿数、后续阈值击穿率（exhaustion / 出现次数）  # [cite: 15]
 #   默认只输出“样本量 >= 阈值”的转移，避免噪声。  # [cite: 15]
-CONT_STATS_ENABLE = 1  # [cite: 15]
+CONT_STATS_ENABLE = 0  # [cite: 15]
 CONT_MAX_BET_N = 12  # [cite: 15]
 CONT_MIN_SAMPLES = 500  # [cite: 15]
 CONT_TOPK = 20  # [cite: 15]
@@ -329,7 +525,7 @@ def _print_top_transitions(title, d, min_samples, topk):
 # 3) 自动识别批次列/结果/点差/变化率/均差
 # 4) 结果必须映射为 B/P/T
 # 5) 严格零未来：run_strategy_on_boot 内严禁访问未来行
-# 6) “下一口/下一行”统一定义：idx+1（不跳过状态 T 位移零偏差）
+# 6) “下一口/下一行”统一定义：紧随投放点的下一行（不跳过状态 T 位移零偏差）
 # 7) 单边/双边：前 9 口分类；单边弱累计 >=3 转双边；交易次数限制见模板文档
 #
 # 注意：未来新增/修改策略，只改 run_strategy_on_boot(records) 内部逻辑
@@ -362,6 +558,13 @@ def safe_float(v, default=None):
     except Exception:
         return default
 
+
+def _is_raw_missing(x):
+    if x is None:
+        return True
+    s = str(x).strip().lower()
+    return (s == "" or s == "none" or s == "nan")
+
 def safe_int(v, default=0):
     try:
         if v is None or v == "":
@@ -390,19 +593,20 @@ def _first_hit(keys, candidates):
 def detect_columns(row0):
     """
     输入：row0（DictReader 读到的一行 dict）
-    输出：col_shoe, col_result, col_diff, col_rate, col_mean
-    目标：一次性解决你现有 CSV 的多种表头（含 2=变化率、M3=均差、Exhaustion=B/P/T、BB/PP 等）。
+    输出：col_batch, col_end, col_result, col_diff, col_rate, col_mean
+
+    靴边界口径（锁死）：
+    - 批次/靴号：Sub-Batch
+    - 靴结束：靴结束（仅最后一口为1，其余为0；若缺失/不一致则报错）
     """
     keys = list(row0.keys()) if isinstance(row0, dict) else []
 
-    # 靴号（若没有，允许退化到局号）
-    col_shoe = _first_hit(keys, ["靴", "靴号", "shoe", "Shoe", "本靴", "本靴靴号", "全局靴号", "本卷靴号"])
-    if col_shoe is None:
-        col_shoe = _first_hit(keys, ["局号", "hand", "Hand", "round", "Round"])
-    if col_shoe is None and keys:
-        col_shoe = keys[0]
+    # Sub-Batch（靴号/批次号）
+    col_batch = _first_hit(keys, ["Sub-Batch", "sub-batch", "sub_batch", "subbatch", "批次", "批次号", "batch", "Batch"])
+    # 靴结束
+    col_end = _first_hit(keys, ["靴结束", "shoe_end", "shoe end", "end", "End", "结束", "boot_end", "BootEnd"])
 
-    # 结果列：你数据常见 Exhaustion（值为B/P/T）
+    # 结果列：常见 Exhaustion（值为B/P/T）
     col_result = _first_hit(keys, ["Exhaustion", "exhaustion", "结果", "result", "Result", "Outcome", "outcome"])
 
     # 点差/变化率/均差（支持 2/M3）
@@ -410,7 +614,8 @@ def detect_columns(row0):
     col_rate = _first_hit(keys, ["变化率", "rate", "Rate", "roc", "ROC", "r", "R", "2"])
     col_mean = _first_hit(keys, ["均差", "mean", "Mean", "avg", "Avg", "average", "Average", "M3", "m3"])
 
-    return col_shoe, col_result, col_diff, col_rate, col_mean
+    return col_batch, col_end, col_result, col_diff, col_rate, col_mean
+
 
 def _print_header_mapping_once(row0, cols):
     """表头识别自证：只打印一次；绝不影响主流程。"""
@@ -421,47 +626,13 @@ def _print_header_mapping_once(row0, cols):
 
     try:
         sample_row = row0 if isinstance(row0, dict) else {}
-        keys = list(sample_row.keys())
 
-        # 清理表头键：去 BOM、去首尾空格（不修改原数据，只用于匹配）
-        norm_map = {}
-        for k in keys:
-            if isinstance(k, str):
-                kk = k.lstrip("\ufeff").strip()
-            else:
-                kk = k
-            norm_map[kk] = k
-        norm_keys = list(norm_map.keys())
-
-        def pick(cands):
-            # 1:1 物理匹配（优先原键）
-            for c in cands:
-                if c in sample_row:
-                    return c
-            # 1:1 物理匹配（清理后键）
-            for c in cands:
-                if c in norm_map:
-                    return norm_map[c]
-            # 模糊匹配（清理后键）
-            for k in norm_keys:
-                for c in cands:
-                    if isinstance(k, str) and isinstance(c, str) and (c.lower() in k.lower()):
-                        return norm_map.get(k, k)
-            return None
-
-        # cols 是 detect_columns 传入的结果；若为 None 则回退推断
-        col_shoe, col_result, col_diff, col_rate, col_mean = cols
-
-        # 兜底推断：只在缺失时补
-        if col_shoe is None:   col_shoe = pick(["局号", "hand", "Hand", "No", "no", "shoe", "靴号", "靴"])
-        if col_result is None: col_result = pick(["Exhaustion", "结果", "result", "Result", "r", "R"])
-        if col_diff is None:   col_diff = pick(["点差", "diff", "Diff", "spread", "Spread"])
-        if col_rate is None:   col_rate = pick(["变化率", "rate", "Rate", "2", "R2"])
-        if col_mean is None:   col_mean = pick(["均差", "mean", "Mean", "M3", "m3", "avg", "Avg"])
+        col_batch, col_end, col_result, col_diff, col_rate, col_mean = cols
 
         print("==================================================")
         print("表头识别（自证｜一次性打印）")
-        print("靴 ->", col_shoe)
+        print("批次(Sub-Batch) ->", col_batch)
+        print("靴结束 ->", col_end)
         print("结果 ->", col_result)
         print("点差 ->", col_diff)
         print("变化率 ->", col_rate)
@@ -475,15 +646,25 @@ def _print_header_mapping_once(row0, cols):
         print("样例行(原始):", d)
         print("==================================================")
     except Exception as e:
-        # 只要主流程能跑，自证失败不影响执行
         print("⚠ 表头自证打印失败（不影响运行）:", str(e))
 
+
 def boot_filter(records):
-    b_run, p_run, seen_all = _compute_max_runs_first9(records)
-    if seen_all < 9:
-        return False
-    if b_run >= 3 and p_run >= 3:
-        return False
+    # 靴级完整性：不存在不足 9 口的靴；若发现则报错并输出说明（锁死）
+    if records is None or len(records) < 9:
+        # 证据只需打印一次：文件|Sub-Batch|idx（若缺失则尽量输出已有信息）
+        f = None
+        sb = None
+        last_idx = None
+        try:
+            if records:
+                f = records[0].get("file")
+                sb = records[0].get("sub_batch")
+                last_idx = records[-1].get("idx")
+        except Exception:
+            pass
+        print("❌❌❌ 靴级完整性失败：不足9口 | 文件|Sub-Batch|idx =", f, sb, last_idx)
+        raise RuntimeError("靴级完整性失败：不足9口")
     return True
 
 
@@ -492,123 +673,139 @@ def boot_filter(records):
 # 3) 单批次策略入口（只允许改这里）
 # ------------------------------------------------------------
 def run_strategy_on_boot(records):
-    # 1. 物理槽位初始化
-    snapshots = []  # 存放“实际投放前”的快照列表
-    star_snap = None  # 投放点当行快照（L1）
+    snapshots = []
+    star_snap = None
 
     entry, match, mismatch, exhaustion = 0, 0, 0, 0
     profit = 0.0
 
-    # 2. 策略逻辑循环
-    # 结构扫描模块输出（模板占位：默认不激活，避免 NameError）
-    current_w_len = 0
-    other_dna_conditions = False
-    target_side = "B"
+    if not STRUCT_SCAN:
+        return {
+            "entry": 0, "match": 0, "mismatch": 0, "exhaustion": 0, "profit": 0.0,
+            "snapshots": [], "star_snap": None, "trade_bust": 0,
+            "struct_status": "STRUCT_SKIP", "struct_fail_reason": None, "struct_info": None,
+        }
 
-    for idx, r in enumerate(records):
-        # --- A层：结构激活（模板占位｜待接入真实结构扫描输出）---
-        # 最小激活条件：投放点必须 idx>=9 且 本行结果为B/P（状态T不允许作为投放点）
-        rr = r.get("r") if isinstance(r, dict) else None
-        is_structure_active = (idx >= 9 and rr in ("B", "P"))
+    status, star_idx, strong_side, info = scan_structure(records)
+    if status != "STRUCT_OK":
+        return {
+            "entry": 0, "match": 0, "mismatch": 0, "exhaustion": 0, "profit": 0.0,
+            "snapshots": [], "star_snap": None, "trade_bust": 0,
+            "struct_status": "STRUCT_FAIL",
+            "struct_fail_reason": (info.get("fail_reason") if isinstance(info, dict) else None),
+            "struct_info": info,
+        }
 
-        if is_structure_active:
-            # --- 投放点当行快照（L1）---
-            star_snap = {
-                'idx': idx,
-                'r': rr,
-                'diff': r.get('diff'),
-                'rate': r.get('rate'),
-                'mean': r.get('mean'),
-            }
+    star_row = records[star_idx]
+    star_seen = star_row.get("seen_all")
 
-            # --- B层：神谕审计 (Oracle Audit) ---
-            # 物理职能：仅对已激活的结构执行“通过/不通过”判定
-            # 严禁在此生成任何下注信号。
-            is_oracle_pass = True # [此处由策略调用 外部参数 参数进行审计]
+    if star_row.get("r") not in ("B", "P"):
+        print("❌❌❌ STRUCT_ERROR：⭐落在T | 文件|Sub-Batch|idx|seen|r|diff =", _CTX_FILE, _CTX_SUBBATCH, star_idx, star_seen, star_row.get("r"), star_row.get("diff"))
+        raise RuntimeError("STRUCT_ERROR：⭐落在T")
+    try:
+        if int(star_row.get("diff")) == 0:
+            print("❌❌❌ STRUCT_ERROR：⭐点差=0 | 文件|Sub-Batch|idx|seen|r|diff =", _CTX_FILE, _CTX_SUBBATCH, star_idx, star_seen, star_row.get("r"), star_row.get("diff"))
+            raise RuntimeError("STRUCT_ERROR：⭐点差=0")
+    except Exception:
+        print("❌❌❌ STRUCT_ERROR：⭐点差无法解析 | 文件|Sub-Batch|idx|seen|r|diff =", _CTX_FILE, _CTX_SUBBATCH, star_idx, star_seen, star_row.get("r"), star_row.get("diff"))
+        raise RuntimeError("STRUCT_ERROR：⭐点差无法解析")
 
-            if not is_oracle_pass:
-                # 审计不通过：放弃本次执行，程序必须继续向后扫描
-                continue
+    star_snap = {
+        "file": star_row.get("file"),
+        "sub_batch": star_row.get("sub_batch"),
+        "idx": star_idx,
+        "seen_all": star_seen,
+        "r": star_row.get("r"),
+        "diff": star_row.get("diff"),
+        "rate": star_row.get("rate"),
+        "mean": star_row.get("mean"),
+        "rate_raw": star_row.get("rate_raw"),
+        "mean_raw": star_row.get("mean_raw"),
+    }
 
-            # --- C层：执行与负向阻断 (Negative Interception) ---
-            entry += 1
-            units = [1, 2, 4, 8]
-            is_settled = False
+    target_side = strong_side
+    entry += 1
 
-            # 物理游标：从“投放点下一行”开始逐行推进（不允许 idx + 偏移量 直算）
-            j = idx + 1
-            bet_n = 1
-            max_bet = len(units)
+    units = [1, 2, 4, 8]
+    is_settled = False
 
-            while bet_n <= max_bet and j < len(records):
-                # 1) 决策口快照：每次“实际投放前”必须记录一次指标快照
-                decision_row = records[j]  # 本次即将投放的行
+    j = star_idx
+    j += 1
+    bet_n = 1
+    max_bet = len(units)
 
-                snap = {
-                    'bet_n': bet_n,    # 第几注（只在完成一次有效结算后才推进）
-                    'idx': j,          # 快照行号=本次实际投放前的行号（不是投放点行号）
-                    'diff': decision_row['diff'],
-                    'rate': decision_row['rate'],
-                    'mean': decision_row['mean'],
-                }
-                snapshots.append(snap)
+    while bet_n <= max_bet and j < len(records):
+        decision_row = records[j]
 
-                # 2) STOP 判断只能发生在这里（投放点/决策口），只读 snap / snapshots
-                #    若触发 STOP：记录“提前止损”并 break（结束本批次交易）
-                # if should_stop(snapshots):
-                #     early_stop += 1
-                #     break
+        if BOOT_FILTER:
+            seen = decision_row.get("seen_all")
+            if seen is not None:
+                try:
+                    if 1 <= int(seen) <= 8:
+                        j += 1
+                        continue
+                except Exception:
+                    pass
 
-                # 3) 本次投放的结算：只读结果 r（执行/结算阶段禁读任何指标）
-                r = decision_row['r']
+        snap = {
+            "file": decision_row.get("file"),
+            "sub_batch": decision_row.get("sub_batch"),
+            "idx": decision_row.get("idx"),
+            "seen_all": decision_row.get("seen_all"),
+            "r": decision_row.get("r"),
+            "diff": decision_row.get("diff"),
+            "rate": decision_row.get("rate"),
+            "mean": decision_row.get("mean"),
+            "rate_raw": decision_row.get("rate_raw"),
+            "mean_raw": decision_row.get("mean_raw"),
+        }
+        snapshots.append(snap)
 
-                # 状态T：0退回不推进 bet_n，但 j 必须前进，下一次投放前仍要再记一条快照
-                if r == 'T':
-                    j += 1
-                    continue
+        rr = decision_row.get("r")
+        if rr == "T":
+            j += 1
+            continue
 
-                # 非状态T：完成一次有效结算
-                u = units[bet_n - 1]
-
-                if r == target_side:
-                    match += 1
-                    profit += (u * 0.95 if target_side == 'B' else u * 1.0)
-                    is_settled = True
-                    break
-                else:
-                    # 未匹配：本注亏损入账；推进到下一次投放（bet_n + 1），并物理前进到下一行
-                    profit -= u
-                    bet_n += 1
-                    j += 1
-                    continue
-
-            # 4. 汇总判定：全序列未匹配
-            trade_bust_flag = 0
-            if not is_settled:
-                mismatch += 1
-                exhaustion += 1
-                trade_bust_flag = 1
-
-            # trade_bust 回填：连续统计只允许读 snapshots
-            for _s in snapshots:
-                if isinstance(_s, dict):
-                    _s["trade_bust"] = trade_bust_flag
-
-            # 5. 一靴一单元：执行完毕立即跳出 Batch 循环
+        u = units[bet_n - 1]
+        if rr == target_side:
+            match += 1
+            profit += (u * 0.95 if target_side == "B" else u * 1.0)
+            is_settled = True
             break
+        else:
+            profit -= u
+            bet_n += 1
+            j += 1
+            continue
+
+    trade_bust_flag = 0
+    if not is_settled:
+        mismatch += 1
+        exhaustion += 1
+        trade_bust_flag = 1
+
+    for _s in snapshots:
+        if isinstance(_s, dict):
+            _s["trade_bust"] = trade_bust_flag
+
     return {
         "entry": entry,
         "match": match,
         "mismatch": mismatch,
         "exhaustion": exhaustion,
         "profit": profit,
-        "snapshots": snapshots, # 必须返回，用于 TopK 归因
-        "star_snap": star_snap,  # 投放点当行快照（用于L1统计）
-        "trade_bust": 1 if exhaustion > 0 else 0
-    }  # [cite: 26, 32]
+        "snapshots": snapshots,
+        "star_snap": star_snap,
+        "trade_bust": 1 if exhaustion > 0 else 0,
+        "struct_status": "STRUCT_OK",
+        "struct_fail_reason": None,
+        "struct_info": info,
+    }
 
 def load_all_boots(csv_files):
-    boots = defaultdict(list)
+    # boots: list of (meta, records)
+    boots = []  # 每个元素：({"file":..., "sub_batch":...}, [records...])
+
     print("检测到 CSV 文件数量:", len(csv_files))
 
     for i, fname in enumerate(csv_files, 1):
@@ -627,33 +824,93 @@ def load_all_boots(csv_files):
         if not rows:
             continue
 
-        col_shoe, col_result, col_diff, col_rate, col_mean = detect_columns(rows[0])
+        col_batch, col_end, col_result, col_diff, col_rate, col_mean = detect_columns(rows[0])
+        _print_header_mapping_once(rows[0], (col_batch, col_end, col_result, col_diff, col_rate, col_mean))
 
-        _print_header_mapping_once(rows[0], (col_shoe, col_result, col_diff, col_rate, col_mean))
-        for r in rows:
-            shoe = r.get(col_shoe)
-            if shoe is None:
-                continue
+        if col_batch is None or col_end is None:
+            print("❌❌❌ 表头缺失：必须同时存在 Sub-Batch 与 靴结束 | 文件 =", fname)
+            raise RuntimeError("表头缺失：Sub-Batch / 靴结束")
+
+        current_batch = None
+        current_records = []
+        seen_all = 0
+        end_seen = 0
+
+        def _finalize_boot():
+            nonlocal current_batch, current_records, seen_all, end_seen
+            if current_batch is None:
+                return
+            if not current_records:
+                return
+
+            # 靴结束一致性：仅最后一口为1，其余为0（锁死）
+            if end_seen != 1:
+                print("❌❌❌ 靴结束一致性失败：靴结束=1次数!=1 | 文件|Sub-Batch|idx =", fname, current_batch, (current_records[-1].get("idx") if current_records else None))
+                raise RuntimeError("靴结束一致性失败：靴结束=1次数!=1")
+            if safe_int(current_records[-1].get("shoe_end"), 0) != 1:
+                print("❌❌❌ 靴结束一致性失败：最后一口靴结束!=1 | 文件|Sub-Batch|idx =", fname, current_batch, current_records[-1].get("idx"))
+                raise RuntimeError("靴结束一致性失败：最后一口靴结束!=1")
+
+            boots.append(({"file": fname, "sub_batch": current_batch}, current_records))
+
+            # reset
+            current_batch = None
+            current_records = []
+            seen_all = 0
+            end_seen = 0
+
+        for row_i, r in enumerate(rows):
+            batch = r.get(col_batch)
+
+            # 子批次启动
+            if current_batch is None:
+                current_batch = batch
+
+            # Sub-Batch 变更必须与靴结束对齐（锁死）：未遇到靴结束=1 不允许变更
+            if batch != current_batch:
+                print("❌❌❌ 靴边界失败：Sub-Batch 在靴结束前发生变更 | 文件|Sub-Batch|idx =", fname, current_batch, (current_records[-1].get("idx") if current_records else None))
+                raise RuntimeError("靴边界失败：Sub-Batch 变更未对齐靴结束")
 
             res_raw = r.get(col_result)
             res = map_result(res_raw)
             if res not in ("B", "P", "T"):
+                # 无法映射的不入库（锁死）
                 continue
 
             diff = safe_int(r.get(col_diff, 0), 0)
-            rate = safe_float(r.get(col_rate), None) if col_rate else None
-            mean = safe_float(r.get(col_mean), None) if col_mean else None
+            rate_raw = (r.get(col_rate) if col_rate else None)
+            mean_raw = (r.get(col_mean) if col_mean else None)
+            rate = safe_float(rate_raw, None) if col_rate else None
+            mean = safe_float(mean_raw, None) if col_mean else None
+            shoe_end = safe_int(r.get(col_end, 0), 0)
 
-            # 补齐物理索引 idx，确保 snapshots 能够精准对标原始行号
-            boots[shoe].append({
-                "idx": len(boots[shoe]),
+            seen_all += 1
+            rec = {
+                "idx": seen_all - 1,
+                "seen_all": seen_all,
                 "r": res,
                 "diff": diff,
                 "rate": rate,
-                "mean": mean
-            })  # [cite: 30]
+                "mean": mean,
+            "rate_raw": rate_raw,
+            "mean_raw": mean_raw,
+                "file": fname,
+                "sub_batch": current_batch,
+                "shoe_end": shoe_end,
+            }
+            current_records.append(rec)
 
-    print("按批次分组完成，批次总数:", len(boots))
+            if shoe_end == 1:
+                end_seen += 1
+                _finalize_boot()
+
+        # 文件结束：若仍有未封口的靴 → 报错
+        if current_batch is not None:
+            if current_records:
+                print("❌❌❌ 靴结束一致性失败：文件结束仍未遇到靴结束=1 | 文件|Sub-Batch|idx =", fname, current_batch, current_records[-1].get("idx"))
+                raise RuntimeError("靴结束一致性失败：文件结束未封口")
+
+    print("按 Sub-Batch + 靴结束 分靴完成，靴总数:", len(boots))
     return boots
 
 def _run_report(csv_files, title):
@@ -677,7 +934,16 @@ def _run_report(csv_files, title):
     l1_mean_dist = defaultdict(int)  # key: 有效同向/有效反向/中轴
     STAR_ON_T = 0
     STAR_DIFF0_AND_R_IN_BP = 0
-    MEAN_INVALID_BUG = 0
+    MEAN_MISSING_RAW = 0  # 数据缺失-仅统计
+    MEAN_PARSE_FAIL = 0     # 解析失败-目标=0
+    STRUCT_SCAN_CALLS = 0
+    STRUCT_OK = 0
+    STRUCT_FAIL = 0
+    MISS_MAIN_LT3 = 0
+    MISS_WEAK_GT2 = 0
+    MISS_NO_CANDIDATE = 0
+    MISS_ONLY_FORBIDDEN = 0
+
 
 
     cont_agg = _init_cont_agg() if CONT_STATS_ENABLE else None
@@ -712,15 +978,15 @@ def _run_report(csv_files, title):
 
     step = max(1, total_boots // 200) if total_boots > 0 else 1
 
-    for n, (_, rec) in enumerate(boots.items(), 1):
+    for n, (meta, rec) in enumerate(boots, 1):
         if total_boots > 0 and (n == 1 or n == total_boots or (n % step == 0)):
             _print_batch_progress(n, total_boots)
-
-        if not boot_filter(rec):
-            skipped_boots += 1
-            continue
+        boot_filter(rec)  # 靴级完整性校验（不足9口直接报错）
 
         playable_boots += 1
+        global _CTX_FILE, _CTX_SUBBATCH
+        _CTX_FILE = meta.get('file', '')
+        _CTX_SUBBATCH = meta.get('sub_batch', '')
         out = run_strategy_on_boot(rec)
 
         # L1 投放点当行统计：仅使用 star_snap（取值口锁死）
@@ -740,11 +1006,42 @@ def _run_report(csv_files, title):
                 l1_diff_dist[_l1_abs_diff_bucket(sd)] += 1
                 l1_rate_dist[_l1_rate_bucket(srate)] += 1
 
-                mb, inv = _l1_mean_bucket(sd, smean)
-                if inv:
-                    MEAN_INVALID_BUG += 1
+                # L1均差分桶：区分缺失/解析失败（解析失败目标=0）
+                mean_raw = star.get("mean_raw")
+                mean_val = smean
+
+                if _is_raw_missing(mean_raw):
+                    if mean_val is None:
+                        MEAN_MISSING_RAW += 1
+                        mb = None
+                    else:
+                        mb, _ = _l1_mean_bucket(sd, mean_val)
                 else:
+                    if mean_val is None:
+                        MEAN_PARSE_FAIL += 1
+                        mb = None
+                    else:
+                        mb, _ = _l1_mean_bucket(sd, mean_val)
+
+                if mb is not None:
                     l1_mean_dist[mb] += 1
+
+        # 结构扫描自证统计
+        if STRUCT_SCAN:
+            STRUCT_SCAN_CALLS += 1
+            if out.get("struct_status") == "STRUCT_OK":
+                STRUCT_OK += 1
+            elif out.get("struct_status") == "STRUCT_FAIL":
+                STRUCT_FAIL += 1
+                fr = out.get("struct_fail_reason")
+                if fr == "MAIN_LT3":
+                    MISS_MAIN_LT3 += 1
+                elif fr == "WEAK_GT2":
+                    MISS_WEAK_GT2 += 1
+                elif fr == "NO_CANDIDATE":
+                    MISS_NO_CANDIDATE += 1
+                elif fr == "ONLY_FORBIDDEN":
+                    MISS_ONLY_FORBIDDEN += 1
 
         total_entry += int(out.get("entry", 0))
         total_match += int(out.get("match", 0))
@@ -767,8 +1064,15 @@ def _run_report(csv_files, title):
     print("扫描方式：一次性扫描｜一次性交易")
     print("段长口径：禁止跨段累计")
     print("术语锁死：只承认「⭐ / 投放点」")
+    print(f"结构闸门：{STRUCT_SCAN_TEXT}")
+    print(f"{STRUCT_SUMMARY_LINE} | HASH={STRUCT_DEF_HASH}")
+    global _STRUCT_SUMMARY_PRINTED
+    _STRUCT_SUMMARY_PRINTED = True
     print(f"监测开关：{'开' if MONITOR_ENABLE else '关'}")
     print("阈值击穿归因：路径快照（每次实际投放前都快照；含状态 T 后的重复投放；归因只用快照）")
+    print("------------------------------------------------------------")
+    print("TOTAL_BOOT       :", total_boots)
+    print(_boot_filter_label())
     print("------------------------------------------------------------")
     print("总批次数    :", total_boots)
     print("可参与批次数:", playable_boots)
@@ -806,7 +1110,8 @@ def _run_report(csv_files, title):
     print("自证项（每次跑必出）:")
     print("  STAR_ON_T:", STAR_ON_T)
     print("  STAR_DIFF0_AND_R_IN_BP:", STAR_DIFF0_AND_R_IN_BP)
-    print("  MEAN_INVALID_BUG:", MEAN_INVALID_BUG)
+    print("  MEAN_MISSING_RAW:", MEAN_MISSING_RAW)
+    print("  MEAN_PARSE_FAIL:", MEAN_PARSE_FAIL)
 
 
     if cont_agg is not None:
@@ -856,6 +1161,7 @@ def _run_report(csv_files, title):
     print("============================================================")
 
 def main():
+    _audit_structure_slot_integrity()
     _audit_forbid_idx_offset()
     csv_files = sorted([f for f in os.listdir(".") if f.lower().endswith(".csv")])
     if VERIFY_SPLIT_ENABLE and len(csv_files) >= 2:

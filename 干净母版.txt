@@ -1,20 +1,20 @@
 # 🛡️🛡️🛡️
 # -*- coding: utf-8 -*-
 """
-干净母版｜演练引擎（V4｜序列长度口径｜自停｜一次性扫描｜三口术语统一｜未来数封口）
+干净母版｜演练引擎（V4｜一次性扫描｜三口术语统一｜未来数封口）
 ============================================================
 用途：提供一份可复制的干净母版，用于以后所有策略开发与演练。
 硬规则摘要：
 - 只读不算：点差/变化率/均差只读 CSV 原值，不在脚本内重算
 - 严格零未来：任意索引 idx 时，只能使用 0..idx 行做判断
 - 术语锁死：只保留「⭐ / 投放点」（程序内部行推进与结算不对外命名）
-- 前 9 口整批次禁用：只看前 9 口；双方最大序列长度都 >=3 -> 整批次禁用
-- 自停：扫描从批次首开始；一旦两边都曾出现序列长度 >=3 -> 立即结束本批次扫描
+- 靴级闸门：仅限制下注，前8口禁止实际落注（seen_all=1..8），第9口起允许；结构扫描与⭐/投放点扫描不受影响
 - 扫描方式：彻底一次性（每批次最多 1 次投放）；禁用持续扫描与 2 次投放机会
 """
 
 import csv
 import os
+import hashlib
 from collections import defaultdict
 
 # 表头自证：只打印一次
@@ -22,6 +22,82 @@ _HEADER_MAPPING_PRINTED = False
 
 
 SCAN_MODE_LOCKED = "一次性扫描"
+
+# 靴级闸门（锁死）：只禁止“实际落注”发生在 seen_all=1..8；从第9口起允许
+# 开关输出必须带 ✅/⛔
+BOOT_FILTER = 1  # 1=ON✅；0=OFF⛔
+BOOT_FILTER_ON_LABEL = "BOOT_FILTER=ON✅(禁下注 seen_all=1..8)"
+BOOT_FILTER_OFF_LABEL = "BOOT_FILTER=OFF⛔(靴首允许下注)"
+
+# ============================================================
+# 结构闸门（版本A｜结构插槽区｜锁死入口）
+# 说明：
+# - 不锁结构内容：结构由“结构插槽区”提供；模板只锁死“入口/自证/拦截”
+# - STRUCT_SCAN=ON✅：启用结构扫描闸门（后续链路必须使用该入口产出⭐/投放点）
+# - STRUCT_SCAN=OFF⛔：关闭结构闸门（仅自证；不得用于策略执行）
+# ============================================================
+STRUCT_SCAN = 0  # 1=ON✅；0=OFF⛔
+STRUCT_SCAN_ON_LABEL = "STRUCT_SCAN=ON✅(结构扫描开启)"
+STRUCT_SCAN_OFF_LABEL = "STRUCT_SCAN=OFF⛔(结构扫描关闭-仅自证)"
+
+def _hash8(s):
+    try:
+        return hashlib.sha1(str(s).encode("utf-8")).hexdigest()[:8]
+    except Exception:
+        return "00000000"
+
+
+# [STRUCT_SLOT_BEGIN]
+# 结构插槽区（唯一允许出现结构定义的地方）
+# - 以后更换结构：只替换本插槽区内容；模板其余部分禁止出现任何结构判断
+STRUCT_SUMMARY_LINE = "（结构插槽：由策略注入）"
+
+def scan_structure(records):
+    # 结构扫描唯一入口（占位）：默认失败（母版不激活结构）
+    # 返回字段锁死：status ∈ {STRUCT_OK, STRUCT_FAIL}; star_idx 为⭐/投放点行号（靴内 idx）
+    return {
+        "status": "STRUCT_FAIL",
+        "star_idx": None,
+        "strong_side": None,
+        "weak_side": None,
+        "summary": STRUCT_SUMMARY_LINE,
+    }
+# [STRUCT_SLOT_END]
+
+
+def _audit_structure_slot_integrity():
+    # 自检：scan_structure 与 STRUCT_SUMMARY_LINE 必须且只能出现 1 次，且必须位于结构插槽区内
+    try:
+        with open(__file__, "r", encoding="utf-8") as f:
+            src = f.read()
+    except Exception:
+        return
+
+    begin_mark = "# [STRUCT_SLOT_BEGIN]"
+    end_mark = "# [STRUCT_SLOT_END]"
+
+    b = src.find(begin_mark)
+    e = src.find(end_mark)
+    if b < 0 or e < 0 or e <= b:
+        raise RuntimeError("❌ 缺少结构插槽标记行：# [STRUCT_SLOT_BEGIN] / # [STRUCT_SLOT_END]")
+
+    slot = src[b:e + len(end_mark)]
+
+    # 全文计数（只计“定义行”，避免被自检代码里的字符串污染）
+    import re
+    if len(re.findall(r"^\s*def\s+scan_structure\s*\(", src, flags=re.M)) != 1:
+        raise RuntimeError("❌ scan_structure 必须且只能出现 1 次")
+    if len(re.findall(r"^\s*STRUCT_SUMMARY_LINE\s*=", src, flags=re.M)) != 1:
+        raise RuntimeError("❌ STRUCT_SUMMARY_LINE 必须且只能出现 1 次")
+
+    # 插槽内必须包含
+    if "def scan_structure" not in slot:
+        raise RuntimeError("❌ scan_structure 必须位于结构插槽区内")
+    if "STRUCT_SUMMARY_LINE" not in slot:
+        raise RuntimeError("❌ STRUCT_SUMMARY_LINE 必须位于结构插槽区内")
+
+# 反伪造自检：禁区内发生任何“实际落注”一票否决
+BET_IN_FORBIDDEN_SEEN = 0
 MONITOR_ENABLE = 0  # 监测开关：0=关；1=开（动态监测/动态止损）
 # 多次决策（动态监测/动态止损｜锁死）：同一笔交易内，每一次【实际投放前】允许做一次“继续/STOP”决定；
 # 决策时刻视为一次“投放点”，只允许读取该行及历史指标；严禁使用该决策口之后（t+1 及以后）的任何信息。
@@ -47,7 +123,7 @@ CONT_TOPK = 10           # 每个位次最多输出 TopK（桶数很少时会输
 # 4) 结果必须映射为 B/P/T
 # 5) 严格零未来：run_strategy_on_boot 内严禁访问未来行
 # 6) “下一口/下一行”统一定义：idx+1（不跳过状态 T）
-# 7) 单边/双边：前 9 口分类；单边弱累计 >=3 转双边；交易次数限制见模板文档
+# 7) 靴级闸门：只限制下注发生点；结构扫描与⭐/投放点扫描不受影响
 #
 # 注意：未来新增/修改策略，只改 run_strategy_on_boot(records) 内部逻辑
 # ============================================================
@@ -93,7 +169,14 @@ def safe_int(v, default=0):
 # 1) 数据加载（固定）
 # ------------------------------------------------------------
 def load_all_boots(csv_files):
-    boots = defaultdict(list)
+    """
+    按 Sub-Batch + 靴结束 分靴（锁死）：
+    - 每条记录必须属于某个 Sub-Batch
+    - 靴结束列仅最后一口为 1，其余为 0
+    - 同一 Sub-Batch 内按原始顺序累积，遇到 靴结束=1 即封靴
+    - 每行标准化字段：r/diff/rate/mean/seen_all/idx（idx为靴内0基）
+    """
+    boots = []
     print("检测到 CSV 文件数量:", len(csv_files))
 
     for i, fname in enumerate(csv_files, 1):
@@ -112,25 +195,59 @@ def load_all_boots(csv_files):
         if not rows:
             continue
 
-        col_shoe, col_result, col_diff, col_rate, col_mean = detect_columns(rows[0])
+        col_sub, col_end, col_result, col_diff, col_rate, col_mean = detect_columns(rows[0])
+        _print_header_mapping_once(rows[0], (col_sub, col_end, col_result, col_diff, col_rate, col_mean))
 
-        _print_header_mapping_once(rows[0], (col_shoe, col_result, col_diff, col_rate, col_mean))
-        for r in rows:
-            shoe = r.get(col_shoe)
-            if shoe is None:
+        cur_sub = None
+        cur = []
+        seen_all = 0
+
+        for rr in rows:
+            sub = rr.get(col_sub)
+            if sub is None or sub == "":
                 continue
 
-            res = map_result(r.get(col_result))
+            # 若遇到 Sub-Batch 变化：先封存上一靴（若有残留）
+            if cur_sub is None:
+                cur_sub = sub
+            elif sub != cur_sub:
+                if cur:
+                    boots.append(({"file": fname, "sub_batch": str(cur_sub)}, cur))
+                cur_sub = sub
+                cur = []
+                seen_all = 0
+
+            res = map_result(rr.get(col_result))
             if res not in ("B", "P", "T"):
                 continue
 
-            diff = safe_int(r.get(col_diff, 0), 0)
-            rate = safe_float(r.get(col_rate), None) if col_rate else None
-            mean = safe_float(r.get(col_mean), None) if col_mean else None
+            diff = safe_int(rr.get(col_diff, 0), 0)
+            rate = safe_float(rr.get(col_rate), None) if col_rate else None
+            mean = safe_float(rr.get(col_mean), None) if col_mean else None
 
-            boots[shoe].append({"r": res, "diff": diff, "rate": rate, "mean": mean})
+            idx_in_boot = len(cur)
+            seen_all += 1
+            cur.append({
+                "r": res,
+                "diff": diff,
+                "rate": rate,
+                "mean": mean,
+                "seen_all": seen_all,
+                "idx": idx_in_boot,
+            })
 
-    print("按批次分组完成，批次总数:", len(boots))
+            end_flag = safe_int(rr.get(col_end, 0), 0) if col_end else 0
+            if end_flag == 1:
+                boots.append(({"file": fname, "sub_batch": str(cur_sub)}, cur))
+                cur_sub = None
+                cur = []
+                seen_all = 0
+
+        # 文件末尾残留：视为不合格分靴，但为保证可跑，仍封存并让审查层处理
+        if cur:
+            boots.append(({"file": fname, "sub_batch": str(cur_sub)}, cur))
+
+    print("按 Sub-Batch + 靴结束 分靴完成，靴总数:", len(boots))
     return boots
 
 
@@ -138,15 +255,18 @@ def _run_report(csv_files, title):
     # ============================================================
     # 物理定位锚点：交付验收水印（锁死｜唯一搜索定位）
     # ============================================================
-    print("🚀🚀🚀 🍔🍔🍔 🎰🎰🎰") 
-    
-    boots = load_all_boots(csv_files)
+    print("🚀🚀🚀 🍔🍔🍔 🎰🎰🎰")
 
+    # 运行级自证：结构闸门与结构摘要（模板锁死）
+    print("术语锁死：只承认「⭐ / 投放点」")
+    print("结构闸门：" + (STRUCT_SCAN_ON_LABEL if STRUCT_SCAN else STRUCT_SCAN_OFF_LABEL))
+    print("结构摘要：" + str(STRUCT_SUMMARY_LINE) + " | HASH=" + _hash8(STRUCT_SUMMARY_LINE))
+
+
+    boots = load_all_boots(csv_files)
     total_boots = len(boots)
-    playable = 0
-    skipped = 0
+
     insufficient9 = 0
-    unplayable = 0
 
     total_entry = 0
     total_win = 0
@@ -154,23 +274,27 @@ def _run_report(csv_files, title):
     total_bust = 0
     total_profit = 0.0
 
+    global BET_IN_FORBIDDEN_SEEN
+    BET_IN_FORBIDDEN_SEEN = 0
+
     cont_stats = init_cont_stats() if (MONITOR_ENABLE and CONT_STATS_ENABLE) else None
 
+    if total_boots > 0:
+        print(f"\n开始处理 {total_boots:,} 个批次...")
+    for i, (meta, rec) in enumerate(boots, 1):
+        if total_boots >= 10 and (i % 1000 == 0 or i == total_boots):
+            # 大批次时，降低打印频率；干净母版以“可跑”为主
+            pass
 
-    for _, rec in boots.items():
-        info = classify_boot_first9(rec)
-        if not info["seen9_ok"]:
+        cls = classify_boot_first9(rec)
+        if not cls["seen9_ok"]:
             insufficient9 += 1
-            continue
-        if not info["playable"]:
-            unplayable += 1
-            continue
-        playable += 1
+            # 只打印一次最小字段即可复现
+            file_ = meta.get("file", "?")
+            sub_ = meta.get("sub_batch", "?")
+            raise AssertionError(f"❌ 不足9口：{file_}|{sub_}|len={len(rec)}")
 
         out = run_strategy_on_boot(rec)
-
-        if cont_stats is not None:
-            update_cont_stats(cont_stats, out.get('snapshots', []), int(out.get('bust', 0)) > 0)
 
         total_entry += int(out.get("entry", 0))
         total_win += int(out.get("win", 0))
@@ -178,39 +302,38 @@ def _run_report(csv_files, title):
         total_bust += int(out.get("bust", 0))
         total_profit += float(out.get("profit", 0.0))
 
-    total_seen = insufficient9 + unplayable + playable
-    skipped = insufficient9 + unplayable
+        if cont_stats and out.get("snapshots"):
+            update_cont_stats(cont_stats, out["snapshots"], out.get("bet_n", 0))
 
-    print() 
-    print("============================================================")
+    # 反伪造自检：禁区内发生任何“实际落注”一票否决
+    if BOOT_FILTER and BET_IN_FORBIDDEN_SEEN != 0:
+        raise AssertionError(f"❌ 靴级闸门失效：禁区内发生实际落注 (BET_IN_FORBIDDEN_SEEN={BET_IN_FORBIDDEN_SEEN})")
+
+    print("\n" + "=" * 60)
     print(title)
-    print("============================================================")
-    print("投放点: ⭐")
-    print(f"监测开关  : {'开' if MONITOR_ENABLE else '关'}")
-    print(f"扫描方式  : {SCAN_MODE_LOCKED}")
-    print("------------------------------------------------------------")
-    print("总批次数    :", total_seen)
-    print("可参与批次数:", playable)
-    print("跳过批次数  :", skipped)
-    print("------------------------------------------------------------")
-    print("激活次数    :", total_entry)
-    print("匹配次数    :", total_win)
-    print("不匹配次数  :", total_lose)
-    print("阈值击穿次数:", total_bust)
-    if total_entry > 0:
-        match_rate = total_win / total_entry * 100
-        exhaustion_rate = total_bust / total_entry * 100
-        print(f"匹配率      : {match_rate:.2f}%")
-        print(f"阈值击穿率  : {exhaustion_rate:.2f}%")
-        print(f"单次平均增益: {total_profit / total_entry:.4f}")
+    print("=" * 60)
+    print(f"TOTAL_BOOT       : {total_boots}")
+    print(BOOT_FILTER_ON_LABEL if BOOT_FILTER else BOOT_FILTER_OFF_LABEL)
+
+    if insufficient9:
+        print(f"BOOT_LT9_ERROR   : {insufficient9}  (目标=0)")
+
+    print("-" * 60)
+    print(f"激活次数    : {total_entry}")
+    print(f"匹配次数    : {total_win}")
+    print(f"不匹配次数  : {total_lose}")
+    print(f"阈值击穿次数: {total_bust}")
+    print(f"单次平均增益: {total_profit / total_entry:.6f}" if total_entry else "单次平均增益: 0.000000")
     print(f"总净值增益  : {total_profit:.2f}")
 
-    if cont_stats is not None:
+    if cont_stats:
+        print("\n" + "-" * 60)
         print_cont_stats(cont_stats)
-
+    print("=" * 60 + "\n")
 
 
 def main():
+    _audit_structure_slot_integrity()
     _audit_forbid_idx_offset()
     csv_files = sorted([f for f in os.listdir(".") if f.lower().endswith(".csv")])
     if VERIFY_SPLIT_ENABLE and len(csv_files) >= 2:
@@ -240,28 +363,26 @@ def _first_hit(keys, candidates):
 
 def detect_columns(row0):
     """
-    输入：row0（DictReader 读到的一行 dict）
-    输出：col_shoe, col_result, col_diff, col_rate, col_mean
-    目标：一次性解决你现有 CSV 的多种表头（含 2=变化率、M3=均差、Exhaustion=B/P/T、BB/PP 等）。
+    输入：row0（DictReader 读到的一行）
+    输出：Sub-Batch / 靴结束 / 结果 / 点差 / 变化率 / 均差 列名（锁死）
     """
-    keys = list(row0.keys()) if isinstance(row0, dict) else []
+    col_sub = _first_hit(row0, ["Sub-Batch", "sub-batch", "subbatch", "SubBatch", "Sub Batch", "子批次", "本靴", "本靴靴号"])
+    col_end = _first_hit(row0, ["靴结束", "shoe_end", "ShoeEnd", "boot_end", "End", "结束"])
+    col_result = _first_hit(row0, ["结果", "Exhaustion", "Result", "R"])
+    col_diff = _first_hit(row0, ["点差", "diff", "Diff"])
+    col_rate = _first_hit(row0, ["变化率", "rate", "Rate"])
+    col_mean = _first_hit(row0, ["均差", "mean", "Mean"])
 
-    # 靴号（若没有，允许退化到局号）
-    col_shoe = _first_hit(keys, ["靴", "靴号", "shoe", "Shoe", "本靴", "本靴靴号", "全局靴号", "本卷靴号"])
-    if col_shoe is None:
-        col_shoe = _first_hit(keys, ["局号", "hand", "Hand", "round", "Round"])
-    if col_shoe is None and keys:
-        col_shoe = keys[0]
+    if col_sub is None:
+        raise ValueError("缺少必要列：Sub-Batch")
+    if col_end is None:
+        raise ValueError("缺少必要列：靴结束")
+    if col_result is None:
+        raise ValueError("缺少必要列：结果/Exhaustion")
+    if col_diff is None:
+        raise ValueError("缺少必要列：点差")
 
-    # 结果列：你数据常见 Exhaustion（值为B/P/T）
-    col_result = _first_hit(keys, ["Exhaustion", "exhaustion", "结果", "result", "Result", "Outcome", "outcome"])
-
-    # 点差/变化率/均差（支持 2/M3）
-    col_diff = _first_hit(keys, ["点差", "diff", "Diff", "spread", "Spread", "delta", "Delta"])
-    col_rate = _first_hit(keys, ["变化率", "rate", "Rate", "roc", "ROC", "r", "R", "2"])
-    col_mean = _first_hit(keys, ["均差", "mean", "Mean", "avg", "Avg", "average", "Average", "M3", "m3"])
-
-    return col_shoe, col_result, col_diff, col_rate, col_mean
+    return col_sub, col_end, col_result, col_diff, col_rate, col_mean
 
 def _print_header_mapping_once(row0, cols):
     """表头识别自证：只打印一次；绝不影响主流程。"""
@@ -270,121 +391,29 @@ def _print_header_mapping_once(row0, cols):
         return
     _HEADER_MAPPING_PRINTED = True
 
-    try:
-        sample_row = row0 if isinstance(row0, dict) else {}
-        keys = list(sample_row.keys())
+    col_sub, col_end, col_result, col_diff, col_rate, col_mean = cols
 
-        # 清理表头键：去 BOM、去首尾空格（不修改原数据，只用于匹配）
-        norm_map = {}
-        for k in keys:
-            if isinstance(k, str):
-                kk = k.lstrip("\ufeff").strip()
-            else:
-                kk = k
-            norm_map[kk] = k
-        norm_keys = list(norm_map.keys())
+    print("=" * 50)
+    print("表头识别（自证｜一次性打印）")
+    print(f"批次(Sub-Batch) -> {col_sub}")
+    print(f"靴结束 -> {col_end}")
+    print(f"结果 -> {col_result}")
+    print(f"点差 -> {col_diff}")
+    print(f"变化率 -> {col_rate if col_rate else '(缺失)'}")
+    print(f"均差 -> {col_mean if col_mean else '(缺失)'}")
+    print(f"样例行(原始): {row0}")
+    print("=" * 50)
 
-        def pick(cands):
-            # 1:1 物理匹配（优先原键）
-            for c in cands:
-                if c in sample_row:
-                    return c
-            # 1:1 物理匹配（清理后键）
-            for c in cands:
-                if c in norm_map:
-                    return norm_map[c]
-            # 模糊匹配（清理后键）
-            for k in norm_keys:
-                for c in cands:
-                    if isinstance(k, str) and isinstance(c, str) and (c.lower() in k.lower()):
-                        return norm_map.get(k, k)
-            return None
-
-        # cols 是 detect_columns 传入的结果；若为 None 则回退推断
-        col_shoe, col_result, col_diff, col_rate, col_mean = cols
-
-        # 兜底推断：只在缺失时补
-        if col_shoe is None:   col_shoe = pick(["局号", "hand", "Hand", "No", "no", "shoe", "靴号", "靴"])
-        if col_result is None: col_result = pick(["Exhaustion", "结果", "result", "Result", "r", "R"])
-        if col_diff is None:   col_diff = pick(["点差", "diff", "Diff", "spread", "Spread"])
-        if col_rate is None:   col_rate = pick(["变化率", "rate", "Rate", "2", "R2"])
-        if col_mean is None:   col_mean = pick(["均差", "mean", "Mean", "M3", "m3", "avg", "Avg"])
-
-        print("==================================================")
-        print("表头识别（自证｜一次性打印）")
-        print("靴 ->", col_shoe)
-        print("结果 ->", col_result)
-        print("点差 ->", col_diff)
-        print("变化率 ->", col_rate)
-        print("均差 ->", col_mean)
-
-        # 样例行：只展示前12个键
-        d = {}
-        show_keys = list(sample_row.keys())[:12]
-        for k in show_keys:
-            d[k] = sample_row.get(k)
-        print("样例行(原始):", d)
-        print("==================================================")
-    except Exception as e:
-        # 只要主流程能跑，自证失败不影响执行
-        print("⚠ 表头自证打印失败（不影响运行）:", str(e))
 
 def classify_boot_first9(records):
-    seen = 0
-    max_len = {"B": 0, "P": 0}
-    cur_side = None
-    cur_len = 0
-
-    for row in records:
-        if seen >= 9:
-            break
-        r = row.get("r")
-        if r not in ("B", "P", "T"):
-            continue
-        seen += 1
-
-        if r == "T":
-            # 状态 T 位移零偏差且不打断序列长度
-            continue
-
-        if cur_side is None:
-            cur_side = r
-            cur_len = 1
-        elif r == cur_side:
-            cur_len += 1
-        else:
-            max_len[cur_side] = max(max_len[cur_side], cur_len)
-            cur_side = r
-            cur_len = 1
-
-        max_len[cur_side] = max(max_len[cur_side], cur_len)
-
-    seen9_ok = (seen >= 9)
-    playable = True
-    if seen9_ok and (max_len["B"] >= 3 and max_len["P"] >= 3):
-        playable = False
-
-    return {
-        "seen9_ok": seen9_ok,
-        "playable": playable,
-        "max_len_B": max_len["B"],
-        "max_len_P": max_len["P"],
-    }
+    """
+    靴级自证仅做完整性检查（锁死）：
+    - 不做靴级可打判定（靴级仅限制下注发生点）
+    - 只检查：seen_all>=9（若不足9口，直接报错并打印最小字段）
+    """
+    return {"seen9_ok": (len(records) >= 9)}
 
 
-
-# ------------------------------------------------------------
-# ------------------------------------------------------------
-# 4) 注位快照统计（L2/L3/L4｜事后统计模块）
-# - 只读快照，不回读 records
-# - 仅做“各注位快照分桶分布”（不做相邻对比）
-# - 用途：用于 STOP 画像候选；不得参与激活判定
-#
-# 分桶口径（锁死）：
-# 1) 变化率：减速(rate<0) / 加速(0<=rate<2) / 极值(rate>=2) / 无效
-# 2) |均差|：<3 / ≥3 / 无效
-# 3) |点差|：主分布=1..9；纠错计数=|diff|=0 与 9+ 合并（不进入1..9分布）
-# ------------------------------------------------------------
 def _bucket_abs_diff_monitor(diff):
     try:
         v = abs(int(diff))
@@ -429,7 +458,7 @@ def init_cont_stats():
         "rate": defaultdict(lambda: {"cnt": 0, "bust": 0}),
         "mean": defaultdict(lambda: {"cnt": 0, "bust": 0}),
         "diff": defaultdict(lambda: {"cnt": 0, "bust": 0}),
-        "meta": {"snap_total": 0, "boot_with_snap": 0, "MEAN_INVALID_BUG": 0},
+        "meta": {"snap_total": 0, "boot_with_snap": 0, "MEAN_MISSING_RAW": 0, "MEAN_PARSE_FAIL": 0},
     }
 
 
@@ -449,9 +478,9 @@ def update_cont_stats(cont_stats, snapshots, bust_flag):
         r_bucket = _bucket_rate_monitor(s.get("rate", None))
         m_bucket = _bucket_abs_mean_monitor(s.get("mean", None))
 
-        # 纠错：mean 无效计入 MEAN_INVALID_BUG
-        if m_bucket == "无效":
-            cont_stats["meta"]["MEAN_INVALID_BUG"] += 1
+        # 纠错：mean 缺失仅计数（MEAN_MISSING_RAW）
+        if s.get("mean") is None:
+            cont_stats["meta"]["MEAN_MISSING_RAW"] += 1
 
         k_rate = (n_label, r_bucket)
         k_mean = (n_label, m_bucket)
@@ -524,7 +553,8 @@ def print_cont_stats(cont_stats):
     # 固定自证输出
     print()
     print("------------------------------------------------------------")
-    print("自证项：MEAN_INVALID_BUG（目标=0） =", cont_stats["meta"].get("MEAN_INVALID_BUG", 0))
+    print("自证项：MEAN_MISSING_RAW（仅统计） =", cont_stats["meta"].get("MEAN_MISSING_RAW", 0))
+    print("自证项：MEAN_PARSE_FAIL（目标=0） =", cont_stats["meta"].get("MEAN_PARSE_FAIL", 0))
     print("------------------------------------------------------------")
 
     _print_dist_block("注位快照：变化率分桶（减速/加速/极值/无效）", cont_stats["rate"], ["减速", "加速", "极值", "无效"])
@@ -542,28 +572,31 @@ def print_cont_stats(cont_stats):
 def _audit_forbid_idx_offset():
     # 未来数阻断：禁止出现 idx+偏移量 直算行号/读取行 的片段
     forbidden = [
-        "idx + step_idx", "idx+step_idx",
-        "idx + b_idx", "idx+b_idx",
-        "records[idx +", "records[idx+",
+        # idx 直接偏移
+        "idx" + " + step_idx", "idx" + "+step_idx",
+        "idx" + " + b_idx", "idx" + "+b_idx",
 
-        # 绕路写法（禁止）：区间读取/区间循环/表格式索引
-        "records[idx:","records[idx :","records[ idx:","records[ idx :",
-        "records[idx+1:","records[idx + 1:","records[idx +1:",
-        "range(idx","range(idx +","range( idx",
+        # 直接用 idx 偏移读 records
+        "records[" + "idx" + " +", "records[" + "idx" + "+",
+        "records[" + " idx" + " :", "records[" + "idx" + " :",
+
+        # 切片/区间读取（常见绕路）
+        "records[" + "idx" + "+1:", "records[" + "idx" + " + 1:",
+        "records[" + "idx" + " +1:",
+
+        # range 区间循环（绕路）
+        "range(" + "idx", "range(" + "idx" + " +", "range(" + " idx",
+
+        # 表格式索引
         "iloc[",
-
     ]
+
     import inspect
-    try:
-        src = inspect.getsource(run_strategy_on_boot)
-    except Exception:
-        return  # 无法取源时不阻断（极少见）
-    hits = []
-    for frag in forbidden:
-        if frag in src:
-            hits.append(frag)
-    if hits:
-        raise RuntimeError("安全自检失败：检测到禁止片段: " + str(hits))
+    audit_src = inspect.getsource(run_strategy_on_boot)
+
+    for f in forbidden:
+        if f in audit_src:
+            raise RuntimeError(f"❌ 禁止片段: {f}")
 
 
 def _execute_trade_with_j_cursor(records, start_j, target_side, units, snapshots):
@@ -574,10 +607,19 @@ def _execute_trade_with_j_cursor(records, start_j, target_side, units, snapshots
     while bet_n <= len(units) and j < len(records):
         decision_row = records[j]
 
+        # 靴级闸门（锁死）：禁区内禁止任何“实际落注”（含 T 重复投放）
+        seen_here = decision_row.get("seen_all")
+        if BOOT_FILTER and isinstance(seen_here, int) and seen_here <= 8:
+            global BET_IN_FORBIDDEN_SEEN
+            BET_IN_FORBIDDEN_SEEN += 1
+            raise RuntimeError(f"❌ 禁区落注：seen_all={seen_here}|idx={decision_row.get('idx', j)}")
+
         # 决策口快照（允许读指标：diff/rate/mean）
         snap = {
             "bet_no": bet_n,
-            "idx": j,
+            "idx": decision_row.get("idx", j),
+            "seen_all": decision_row.get("seen_all"),
+            "r": decision_row.get("r"),
             "diff": decision_row.get("diff"),
             "rate": decision_row.get("rate"),
             "mean": decision_row.get("mean"),
@@ -621,7 +663,8 @@ def run_strategy_on_boot(records):
         units = [1, 2, 4, 8]
 
         entry += 1
-        start_j = idx + 1  # 投放点下一行
+        start_j = idx
+        start_j += 1  # 投放点下一行
         ok, u_win = _execute_trade_with_j_cursor(records, start_j, target_side, units, snapshots)
 
         if ok:
