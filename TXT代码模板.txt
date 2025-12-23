@@ -20,6 +20,9 @@ MONITOR_ENABLE = 0
 VERIFY_SPLIT_ENABLE = 0
 
 
+
+# 输出静默开关：1=静默（仅保留主报告+强制自证；不打印表头自证/L1分布/连续统计），0=详细
+SILENT_MODE = 1
 # 靴级开关（锁死）：仅限制“实际落注”是否允许发生在前8口（seen_all=1..8）
 # BOOT_FILTER=ON✅：禁下注 seen_all=1..8；第9口起允许
 # BOOT_FILTER=OFF⛔：靴首允许下注
@@ -164,6 +167,33 @@ STRUCT_DEF_HASH = hashlib.md5(STRUCT_SUMMARY_LINE.encode("utf-8")).hexdigest()[:
 _STRUCT_SUMMARY_PRINTED = False
 
 
+# ==========================
+# 打印格式工具（锁死）
+# ==========================
+def _pct(n, d, nd=2):
+    if d <= 0:
+        return "0%"
+    return f"{(n * 100.0 / d):.{nd}f}%"
+
+def _cnt_pct(n, d, nd=2):
+    return f"{n} ({_pct(n, d, nd)})"
+
+# 开关打印硬锁（锁死）：表头+强制自证 均必须打印
+_PRINTED_SWITCHES_HEADER = False
+_PRINTED_SWITCHES_PROOF = False
+
+def _print_switches_block(where: str):
+    """硬锁：必须打印 BOOT_FILTER 与 STRUCT_SCAN；并打标记供断言。"""
+    global _PRINTED_SWITCHES_HEADER, _PRINTED_SWITCHES_PROOF
+    print(f"结构闸门：{STRUCT_SCAN_TEXT}")
+    print(f"靴级开关：{_boot_filter_label()}")
+    if where == "HEADER":
+        _PRINTED_SWITCHES_HEADER = True
+    elif where == "PROOF":
+        _PRINTED_SWITCHES_PROOF = True
+    else:
+        # 未知位置仍不允许静默放过
+        raise RuntimeError("❌ _print_switches_block(where) where 非法")
 # 上下文（用于最小溯源打印）
 _CTX_FILE = ""
 _CTX_SUBBATCH = ""
@@ -623,6 +653,9 @@ def _print_header_mapping_once(row0, cols):
     if _HEADER_MAPPING_PRINTED:
         return
     _HEADER_MAPPING_PRINTED = True
+    # 静默模式：不打印，但仍完成表头识别与后续流程
+    if SILENT_MODE:
+        return
 
     try:
         sample_row = row0 if isinstance(row0, dict) else {}
@@ -1049,7 +1082,7 @@ def _run_report(csv_files, title):
         total_exhaustion += int(out.get("exhaustion", 0))
         total_profit += float(out.get("profit", 0.0))
 
-        if cont_agg is not None:
+        if (cont_agg is not None) and (not SILENT_MODE):
             _cont_consume_snapshots(cont_agg, out.get("snapshots") or [])
 
     if total_boots > 0:
@@ -1064,7 +1097,7 @@ def _run_report(csv_files, title):
     print("扫描方式：一次性扫描｜一次性交易")
     print("段长口径：禁止跨段累计")
     print("术语锁死：只承认「⭐ / 投放点」")
-    print(f"结构闸门：{STRUCT_SCAN_TEXT}")
+    _print_switches_block("HEADER")
     print(f"{STRUCT_SUMMARY_LINE} | HASH={STRUCT_DEF_HASH}")
     global _STRUCT_SUMMARY_PRINTED
     _STRUCT_SUMMARY_PRINTED = True
@@ -1072,7 +1105,6 @@ def _run_report(csv_files, title):
     print("阈值击穿归因：路径快照（每次实际投放前都快照；含状态 T 后的重复投放；归因只用快照）")
     print("------------------------------------------------------------")
     print("TOTAL_BOOT       :", total_boots)
-    print(_boot_filter_label())
     print("------------------------------------------------------------")
     print("总批次数    :", total_boots)
     print("可参与批次数:", playable_boots)
@@ -1090,24 +1122,28 @@ def _run_report(csv_files, title):
         print(f"单次平均增益: {total_profit / total_entry:.6f}")
     print("总净值增益  :", round(total_profit, 2))
 
-    print()
-    print("------------------------------------------------------------")
-    print("[锁死标题] L1点差分布（投放点｜|点差|=0..9 + 9+）:")
-    for k in [str(i) for i in range(0, 10)] + ["9+"]:
-        if k in l1_diff_dist:
-            print(f"  {k}: {l1_diff_dist[k]}")
-    print("------------------------------------------------------------")
-    print("[锁死标题] L1变化率分桶（投放点｜前小/前大/极值/无效）:")
-    for k in ["前小", "前大", "极值", "无效"]:
-        if k in l1_rate_dist:
-            print(f"  {k}: {l1_rate_dist[k]}")
-    print("------------------------------------------------------------")
-    print("[锁死标题] L1均差分桶（投放点｜有效同向/有效反向/中轴）:")
-    for k in ["有效同向", "有效反向", "中轴"]:
-        if k in l1_mean_dist:
-            print(f"  {k}: {l1_mean_dist[k]}")
+    if not SILENT_MODE:
+        print()
+        print("------------------------------------------------------------")
+        print("[锁死标题] L1点差分布（投放点｜|点差|=0..9 + 9+）:")
+        for k in [str(i) for i in range(0, 10)] + ["9+"]:
+            if k in l1_diff_dist:
+                print(f"  {k}: {l1_diff_dist[k]}")
+        print("------------------------------------------------------------")
+        print("[锁死标题] L1变化率分桶（投放点｜前小/前大/极值/无效）:")
+        for k in ["前小", "前大", "极值", "无效"]:
+            if k in l1_rate_dist:
+                print(f"  {k}: {l1_rate_dist[k]}")
+        print("------------------------------------------------------------")
+        print("[锁死标题] L1均差分桶（投放点｜有效同向/有效反向/中轴）:")
+        for k in ["有效同向", "有效反向", "中轴"]:
+            if k in l1_mean_dist:
+                print(f"  {k}: {l1_mean_dist[k]}")
+
     print("------------------------------------------------------------")
     print("自证项（每次跑必出）:")
+    print("  开关自证（表头+自证各1次，缺失即作废）:")
+    _print_switches_block("PROOF")
     print("  STAR_ON_T:", STAR_ON_T)
     print("  STAR_DIFF0_AND_R_IN_BP:", STAR_DIFF0_AND_R_IN_BP)
     print("  MEAN_MISSING_RAW:", MEAN_MISSING_RAW)
@@ -1158,7 +1194,13 @@ def _run_report(csv_files, title):
                 min(10, CONT_TOPK),
             )
 
-    print("============================================================")
+    
+    # 物理锁死：必须打印两处开关，否则直接作废
+    if not _PRINTED_SWITCHES_HEADER:
+        raise RuntimeError("❌ 缺失表头开关自证：BOOT_FILTER/STRUCT_SCAN 未打印")
+    if not _PRINTED_SWITCHES_PROOF:
+        raise RuntimeError("❌ 缺失强制自证开关：BOOT_FILTER/STRUCT_SCAN 未打印")
+print("============================================================")
 
 def main():
     _audit_structure_slot_integrity()
