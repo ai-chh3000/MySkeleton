@@ -88,6 +88,10 @@ def _print_single_screen_error(gv: 'GuardViolation'):
         _print_force_proof_block()
     except Exception:
         pass
+    try:
+        _flush_audit_log("FAIL")
+    except Exception:
+        pass
     print(f"❌❌❌ 触发条目={gv.rule_id} | code={gv.code} | phase={gv.phase} | evidence={gv.evidence}")
 
 
@@ -327,6 +331,40 @@ _SOURCE_HASHES_PRINTED = False
 
 # 输出静默开关：1=静默（仅保留主报告+强制自证；不打印表头自证/L1分布/连续统计），0=详细
 SILENT_MODE = 1
+
+# 审查跑开关（时间管理局｜锁死）
+# 规则：当 AUDIT_RUN=1 时，必须无条件输出“审查跑必出块”（含 L1 三块锁死标题），不受 SILENT_MODE 影响。
+AUDIT_RUN = 0  # 0=普通跑；1=审查跑（审查跑必出）
+
+# ============================================================
+# 审计日志缓冲（默认静默｜仅失败/报错输出｜锁死）
+# - 目的：避免哈希/loc/审计明细占用打印面板
+# - 行为：正常✅通过不打印；遇到❌❌❌或异常时一次性吐出缓冲区
+# ============================================================
+AUDIT_FAIL_ONLY = 1  # 1=仅失败输出✅；0=总是输出（调试用）
+_AUDIT_LOG_BUF = []
+
+def _audit_log(line: str):
+    try:
+        _AUID = AUDIT_FAIL_ONLY
+    except Exception:
+        _AUID = 1
+    # 始终记录；是否打印由 flush 决定
+    _AUDIT_LOG_BUF.append(str(line))
+
+def _flush_audit_log(tag: str = ""):
+    global _AUDIT_LOG_BUF
+    if not _AUDIT_LOG_BUF:
+        return
+    # 仅在失败路径调用本函数；因此不再额外判断通过/失败
+    head = "【审计日志（仅失败输出）】"
+    if tag:
+        head += f" {tag}"
+    print(head)
+    for x in _AUDIT_LOG_BUF:
+        print(x)
+    _AUDIT_LOG_BUF = []
+
 # 靴级开关（锁死）：仅限制“实际落注”是否允许发生在前8口（seen_all=1..8）
 # BOOT_FILTER=ON✅：禁下注 seen_all=1..8；第9口起允许
 # BOOT_FILTER=OFF⛔：靴首允许下注
@@ -659,13 +697,13 @@ def _should_self_stop(st):
 from collections import defaultdict
 
 # ==========================
-# 连续统计（二指标二连变化｜锁死）  # [cite: 15]
+# 连段统计（双指标相邻态｜锁死）  # [cite: 15]
 # ==========================
-# 目标：在“单指标无规律”的前提下，只观察“二指标二连变化”的分布，用于 STOP 候选筛选；  # [cite: 15]
+# 目标：在“单指标无规律”的前提下，只观察“双指标相邻态”的分布，用于 STOP 候选筛选；  # [cite: 15]
 # 约束：连续统计只能基于“投放前快照列表”做事后汇总；决策逻辑仍必须满足“决策口基准（零未来）”。  # [cite: 15]
 #
 # 快照口径（锁死｜口径 B）：每次【实际投放前】记录一次快照（含状态 T 后的重复投放），快照来自“投放点当行”原始指标。  # [cite: 15]
-# 连续长度（锁死）：二连（上一次→这一次）。  # [cite: 15]
+# 连续长度（锁死）：相邻态（上一次→这一次）。  # [cite: 15]
 #
 # 快照字段（建议策略返回 snapshots 列表，每条至少包含）：  # [cite: 15]
 #   - bet_n: 第几次实际投放（从 1 开始；含状态 T 重复投放会导致 bet_n > 4）  # [cite: 15]
@@ -675,10 +713,10 @@ from collections import defaultdict
 #   - trade_bust: 本笔交易最终是否阈值击穿（0/1，用于计算“后续阈值击穿率”）  # [cite: 15]
 #
 # 输出（锁死｜AI 友好）：  # [cite: 15]
-#   A) (|点差|桶, rate 监测桶) 的二连转移榜：S_{t-1}→S_t（TopK）  # [cite: 15]
-#   B) (|点差|桶, mean 桶) 的二连转移榜：S_{t-1}→S_t（TopK）  # [cite: 15]
-#   每条转移输出：出现次数、后续阈值击穿数、后续阈值击穿率（exhaustion / 出现次数）  # [cite: 15]
-#   默认只输出“样本量 >= 阈值”的转移，避免噪声。  # [cite: 15]
+#   A) (|点差|桶, rate 监测桶) 的相邻态切换榜：S_{t-1}→S_t（TopK）  # [cite: 15]
+#   B) (|点差|桶, mean 桶) 的相邻态切换榜：S_{t-1}→S_t（TopK）  # [cite: 15]
+#   每条切换输出：出现次数、后续阈值击穿数、后续阈值击穿率（exhaustion / 出现次数）  # [cite: 15]
+#   默认只输出“样本量 >= 阈值”的切换，避免噪声。  # [cite: 15]
 CONT_STATS_ENABLE = 0  # [cite: 15]
 CONT_MAX_BET_N = 12  # [cite: 15]
 CONT_MIN_SAMPLES = 500  # [cite: 15]
@@ -892,7 +930,6 @@ RATE_MISSING_RAW_INPUT = 0
 RATE_PARSE_FAIL_INPUT = 0
 MEAN_MISSING_RAW_INPUT = 0
 MEAN_PARSE_FAIL_INPUT = 0
-
 def safe_float(v, default=None, *, kind="GEN"):
     """安全解析 float：永不崩溃；缺失/不可解析 -> None，并计数（补丁B｜锁死）"""
     global RATE_MISSING_RAW_INPUT, RATE_PARSE_FAIL_INPUT, MEAN_MISSING_RAW_INPUT, MEAN_PARSE_FAIL_INPUT
@@ -993,7 +1030,7 @@ def _print_source_hashes():
         "_audit_structure_slot_integrity",
     ]
 
-    print("【SOURCE_HASHES】")
+    _audit_log("【SOURCE_HASHES】")
     for name in targets:
         fn = globals().get(name)
         if not callable(fn):
@@ -1024,7 +1061,7 @@ def _print_source_hashes():
 
         h = hashlib.sha256(s.encode("utf-8")).hexdigest()
         loc = len(s.splitlines())
-        print(f"{name} : {h} : loc={loc}")
+        _audit_log(f"{name} : {h} : loc={loc}")
 
     _SOURCE_HASHES_PRINTED = True
 
@@ -1518,6 +1555,7 @@ def _run_report(csv_files, title):
     STAR_DIFF0_AND_R_IN_BP = 0
     MEAN_MISSING_RAW = 0  # 数据缺失-仅统计
     MEAN_PARSE_FAIL = 0     # 解析失败-目标=0
+    MEAN_INVALID_BUG = 0  # (目标=0) 点差=0却被判为均差无效
     STRUCT_SCAN_CALLS = 0
     STRUCT_OK = 0
     STRUCT_FAIL = 0
@@ -1665,9 +1703,12 @@ def _run_report(csv_files, title):
     print("可参与批次数:", playable_boots)
     print("跳过批次数  :", skipped_boots)
     print("------------------------------------------------------------")
-    print("激活次数    :", total_entry)
-    print("匹配次数    :", total_match)
-    print("不匹配次数  :", total_mismatch)
+    entry_pct = (total_entry / total_boots * 100.0) if total_boots > 0 else 0.0
+    print(f"激活次数    : {total_entry} ({entry_pct:.2f}%)")
+    match_pct = (total_match / total_entry * 100.0) if total_entry > 0 else 0.0
+    mismatch_pct = (total_mismatch / total_entry * 100.0) if total_entry > 0 else 0.0
+    print(f"匹配次数    : {total_match} ({match_pct:.2f}%)")
+    print(f"不匹配次数  : {total_mismatch} ({mismatch_pct:.2f}%)")
 
     # ==========================
     # 正值触发自审（时间管理局｜锁死｜在最终汇总打印之前）
@@ -1703,7 +1744,8 @@ def _run_report(csv_files, title):
     if POSITIVE_AUDIT_ENABLE and (trigger_total or trigger_avg):
         SELF_AUDIT_GATE(final_metrics)
 
-    print("阈值击穿次数:", total_exhaustion)
+    exhaust_pct = (total_exhaustion / total_entry * 100.0) if total_entry > 0 else 0.0
+    print(f"阈值击穿次数: {total_exhaustion} ({exhaust_pct:.2f}%)")
 
     print("自停次数:", total_stop)
     print("零值次数:", total_zero)
@@ -1719,7 +1761,7 @@ def _run_report(csv_files, title):
         print(f"💶💶💶 单次平均增益: {total_profit / total_entry:.6f}")
     print("💶💶💶 总净值增益  :", round(total_profit, 2))
 
-    if not SILENT_MODE:
+    if (AUDIT_RUN == 1) or (not SILENT_MODE):
         print()
         print("------------------------------------------------------------")
         print("[锁死标题] L1点差分布（投放点｜|点差|=0..9 + 9+）:")
@@ -1745,6 +1787,7 @@ def _run_report(csv_files, title):
     print("  STAR_DIFF0_AND_R_IN_BP:", STAR_DIFF0_AND_R_IN_BP)
     print("  MEAN_MISSING_RAW:", MEAN_MISSING_RAW)
     print("  MEAN_PARSE_FAIL:", MEAN_PARSE_FAIL)
+    print("  MEAN_INVALID_BUG(目标=0):", MEAN_INVALID_BUG)
     print("  PPBB_IDENTITY_CHECKED:", PPBB_CHECKED, "| PPBB_MISMATCH:", PPBB_MISMATCH)
     if PPBB_FIRST_EVIDENCE is not None:
         print("  PPBB_FIRST_EVIDENCE:", PPBB_FIRST_EVIDENCE)
@@ -1753,7 +1796,7 @@ def _run_report(csv_files, title):
     if cont_agg is not None:
         print()
         print("------------------------------------------------------------")
-        print("连续统计（二指标二连变化｜事后汇总｜学术版）")
+        print("连段统计（双指标相邻态｜事后汇总）")
         print("说明：仅基于投放前快照列表（含状态 T 重复投放）；样本量不足不输出。")
         print("阈值：min_samples=%d｜TopK=%d" % (CONT_MIN_SAMPLES, CONT_TOPK))
 
@@ -1873,5 +1916,103 @@ def main():
         _print_single_screen_error(gv)
         sys.exit(getattr(gv, 'exit_code', 2))
 
+
+# =========================
+# 轻量自审（仅用于“净值转正”提示；不替代 AUDIT_RUN=1 严格审查）
+# 目标：不中断优化流程；仅提示关键风险；严禁递归自审
+# =========================
+AUTO_SELF_AUDIT_ON_POSITIVE = True   # 净值>0 时触发一次“轻量自审提示”
+IN_SELF_AUDIT = False               # 防重入
+
+def _get_total_pnl_for_self_audit():
+    """
+    兼容不同模板变量名：尽量读取“总净值/总利润”。
+    找不到则返回 None（不触发自审）。
+    """
+    for k in ("TOTAL_PNL", "total_pnl", "TOTAL_PROFIT", "total_profit", "profit_total", "NET_TOTAL", "net_total"):
+        if k in globals():
+            v = globals().get(k)
+            try:
+                return float(v)
+            except Exception:
+                return None
+    return None
+
+def _self_audit_light():
+    """
+    轻量自审：
+    - 只做“必须立即中断”的致命项 + 若干提示项
+    - 默认不影响主流程（除非致命项被触发）
+    """
+    # 致命项：禁下注区出现真实落注（必须中断，避免结果不可用）
+    bet_forbidden = globals().get("BET_IN_FORBIDDEN_SEEN", 0)
+    try:
+        bet_forbidden = int(bet_forbidden)
+    except Exception:
+        bet_forbidden = 0
+
+    if bet_forbidden > 0:
+        raise RuntimeError(f"BET_IN_FORBIDDEN_SEEN>0（={bet_forbidden}）——禁下注区发生真实落注，结果作废")
+
+    # 提示项：只做“存在性”提示，不做严格口径判死
+    hints = []
+    if globals().get("STRUCT_SCAN", None) is not None and (globals().get("STRUCT_SCAN") is False):
+        hints.append("STRUCT_SCAN=OFF")
+    if globals().get("BOOT_FILTER", None) is not None and (globals().get("BOOT_FILTER") is False):
+        hints.append("BOOT_FILTER=OFF")
+
+    # 恒等式闭环提示（若存在这些计数器才检查）
+    entry = globals().get("total_entry", None)
+    match = globals().get("total_match", None)
+    mismatch = globals().get("total_mismatch", None)
+    exhaustion = globals().get("total_exhaustion", None)
+    stop = globals().get("total_stop", None)
+    zero = globals().get("total_zero", None)
+
+    try:
+        if entry is not None:
+            entry_i = int(entry)
+            parts = []
+            for v in (match, mismatch, exhaustion, stop, zero):
+                if v is not None:
+                    parts.append(int(v))
+            if parts:
+                if entry_i != sum(parts):
+                    hints.append("恒等式不闭环（Entry≠分支总和）")
+    except Exception:
+        # 轻量自审不因解析失败打断
+        pass
+
+    # 输出：一行提示，不刷屏
+    if hints:
+        print("【轻量自审】⚠️ 提示：", " / ".join(hints))
+    else:
+        print("【轻量自审】✅ 通过（轻量）")
+
+def _auto_self_audit_after_run():
+    """
+    仅在“非严格审查跑”且净值>0 时触发一次轻量自审提示。
+    """
+    global IN_SELF_AUDIT
+    if IN_SELF_AUDIT:
+        return
+    if globals().get("AUDIT_RUN", 0) == 1:
+        return
+    if not globals().get("AUTO_SELF_AUDIT_ON_POSITIVE", False):
+        return
+
+    pnl = _get_total_pnl_for_self_audit()
+    if pnl is None:
+        return
+    if pnl <= 0:
+        return
+
+    IN_SELF_AUDIT = True
+    try:
+        _self_audit_light()
+    finally:
+        IN_SELF_AUDIT = False
+
 if __name__ == "__main__":
     main()
+    _auto_self_audit_after_run()

@@ -184,6 +184,52 @@ def run_hard_injection_selftest():
     print("=== 自检完成 ===")
 
 
+
+# ============================================================
+# 审计日志缓冲（默认静默｜仅失败/报错输出｜锁死）
+# - 目的：避免哈希/loc/审计明细占用打印面板
+# - 行为：正常✅通过不打印；遇到❌❌❌或异常时一次性吐出缓冲区
+# ============================================================
+AUDIT_FAIL_ONLY = 1  # 1=仅失败输出✅；0=总是输出（调试用）
+_AUDIT_LOG_BUF = []
+_AUDIT_LOG_FLUSHED = False
+
+def _audit_log(x):
+    # 仅用于“审计/哈希/loc/明细”类输出；主报告不走这里
+    global _AUDIT_LOG_BUF
+    if x is None:
+        return
+    try:
+        s = str(x)
+    except Exception:
+        s = "<AUDIT_LOG_STR_FAIL>"
+    _AUDIT_LOG_BUF.append(s)
+
+def _audit_flush(tag="FAIL"):
+    # 仅在失败/异常时调用；用于一次性吐出缓冲区作为证据
+    global _AUDIT_LOG_BUF, _AUDIT_LOG_FLUSHED
+    if _AUDIT_LOG_FLUSHED:
+        return
+    _AUDIT_LOG_FLUSHED = True
+    if not _AUDIT_LOG_BUF:
+        return
+    head = "【AUDIT_LOG】"
+    if tag:
+        head += f" {tag}"
+    print(head)
+    for x in _AUDIT_LOG_BUF:
+        print(x)
+    _AUDIT_LOG_BUF = []
+
+def _emit_source_hashes_once(lines, tag="SOURCE_HASHES"):
+    # 兼容：需要打印“哈希/loc”时，统一走这里；默认静默，失败才吐出
+    # lines: list[str]
+    if not lines:
+        return
+    _audit_log(f"【{tag}】")
+    for x in lines:
+        _audit_log(x)
+
 SCAN_MODE_LOCKED = "一次性扫描"
 
 # 靴级闸门（锁死）：只禁止“实际落注”发生在 seen_all=1..8；从第9口起允许
@@ -883,5 +929,104 @@ def run_strategy_on_boot(records):
             s["trade_bust"] = 1 if bust > 0 else 0
 
     return {"entry": entry, "win": win, "lose": lose, "bust": bust, "profit": profit, "snapshots": snapshots}
+
+# =========================
+# 轻量自审（仅用于“净值转正”提示；不替代 AUDIT_RUN=1 严格审查）
+# 目标：不中断优化流程；仅提示关键风险；严禁递归自审
+# =========================
+AUTO_SELF_AUDIT_ON_POSITIVE = True   # 净值>0 时触发一次“轻量自审提示”
+IN_SELF_AUDIT = False               # 防重入
+
+def _get_total_pnl_for_self_audit():
+    """
+    兼容不同母版变量名：尽量读取“总净值/总利润”。
+    找不到则返回 None（不触发自审）。
+    """
+    for k in ("TOTAL_PNL", "total_pnl", "TOTAL_PROFIT", "total_profit", "profit_total", "NET_TOTAL", "net_total"):
+        if k in globals():
+            v = globals().get(k)
+            try:
+                return float(v)
+            except Exception:
+                return None
+    return None
+
+def _self_audit_light():
+    """
+    轻量自审：
+    - 只做“必须立即中断”的致命项 + 若干提示项
+    - 默认不影响主流程（除非致命项被触发）
+    """
+    # 致命项：禁下注区出现真实落注（必须中断，避免结果不可用）
+    bet_forbidden = globals().get("BET_IN_FORBIDDEN_SEEN", 0)
+    try:
+        bet_forbidden = int(bet_forbidden)
+    except Exception:
+        bet_forbidden = 0
+
+    if bet_forbidden > 0:
+        raise RuntimeError(f"BET_IN_FORBIDDEN_SEEN>0（={bet_forbidden}）——禁下注区发生真实落注，结果作废")
+
+    # 提示项：只做“存在性”提示，不做严格口径判死
+    hints = []
+    if globals().get("STRUCT_SCAN", None) is not None and (globals().get("STRUCT_SCAN") is False):
+        hints.append("STRUCT_SCAN=OFF")
+    if globals().get("BOOT_FILTER", None) is not None and (globals().get("BOOT_FILTER") is False):
+        hints.append("BOOT_FILTER=OFF")
+
+    # 恒等式闭环提示（若存在这些计数器才检查）
+    entry = globals().get("total_entry", None)
+    match = globals().get("total_match", None)
+    mismatch = globals().get("total_mismatch", None)
+    exhaustion = globals().get("total_exhaustion", None)
+    stop = globals().get("total_stop", None)
+    zero = globals().get("total_zero", None)
+
+    try:
+        if entry is not None:
+            entry_i = int(entry)
+            parts = []
+            for v in (match, mismatch, exhaustion, stop, zero):
+                if v is not None:
+                    parts.append(int(v))
+            if parts and entry_i != sum(parts):
+                hints.append("恒等式不闭环（Entry≠分支总和）")
+    except Exception:
+        # 轻量自审不因解析失败打断
+        pass
+
+    # 输出：一行提示，不刷屏
+    if hints:
+        print("【轻量自审】⚠️ 提示：", " / ".join(hints))
+    else:
+        print("【轻量自审】✅ 通过（轻量）")
+
+def _auto_self_audit_after_run():
+    """
+    仅在“非严格审查跑”且净值>0 时触发一次轻量自审提示。
+    """
+    global IN_SELF_AUDIT
+    if IN_SELF_AUDIT:
+        return
+    if globals().get("AUDIT_RUN", 0) == 1:
+        return
+    if not globals().get("AUTO_SELF_AUDIT_ON_POSITIVE", False):
+        return
+
+    pnl = _get_total_pnl_for_self_audit()
+    if pnl is None or pnl <= 0:
+        return
+
+    IN_SELF_AUDIT = True
+    try:
+        _self_audit_light()
+    finally:
+        IN_SELF_AUDIT = False
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+        _auto_self_audit_after_run()
+    except Exception:
+        _audit_flush("EXCEPTION")
+        raise
