@@ -20,6 +20,169 @@ from collections import defaultdict
 # 表头自证：只打印一次
 _HEADER_MAPPING_PRINTED = False
 
+# ==========================
+# 加固母版：权限/快照/阶段机（V1）
+# ==========================
+from dataclasses import dataclass
+
+# 全局计数（解析自证用）
+MEAN_MISSING_RAW = 0
+MEAN_PARSE_FAIL = 0
+RATE_MISSING_RAW = 0
+RATE_PARSE_FAIL = 0
+
+# 阶段机（锁死：单向）
+PHASE_SCAN = "SCAN"
+PHASE_DECISION = "DECISION"   # 仅“⭐/投放点”允许读指标、写快照
+PHASE_EXECUTE = "EXECUTE"
+PHASE_SETTLE = "SETTLE"
+PHASE_DONE = "DONE"
+
+_ALLOWED_PHASE_TRANSITIONS = {
+    PHASE_SCAN: {PHASE_DECISION},
+    PHASE_DECISION: {PHASE_EXECUTE},
+    PHASE_EXECUTE: {PHASE_SETTLE},
+    PHASE_SETTLE: {PHASE_DONE},
+    PHASE_DONE: set(),
+}
+
+def _phase_transition(ctx, new_phase):
+    old = ctx.get("phase")
+    if old not in _ALLOWED_PHASE_TRANSITIONS:
+        raise RuntimeError(f"PHASE_ERROR: unknown phase {old}")
+    if new_phase not in _ALLOWED_PHASE_TRANSITIONS[old]:
+        raise RuntimeError(f"PHASE_ERROR: illegal transition {old} -> {new_phase}")
+    ctx["phase"] = new_phase
+
+@dataclass(frozen=True)
+class Snapshot:
+    # 最小快照：只允许携带三指标 + 定位字段
+    diff: int
+    rate: object
+    mean: object
+    boot_id: str
+    idx: int
+    seen_all: int
+    rr: str
+    source: str  # "STAR_ROW" or "DROP_ROW"
+
+    # 禁止 dict.get / 下标绕过
+    def get(self, *args, **kwargs):
+        raise RuntimeError("METRIC_ACCESS_BLOCKED: Snapshot 不能用 get()，必须走 secure_read_metric")
+    def __getitem__(self, k):
+        raise RuntimeError("METRIC_ACCESS_BLOCKED: Snapshot 不能用 []，必须走 secure_read_metric")
+
+@dataclass(frozen=True)
+class RowLite:
+    # EXECUTE/SETTLE 阶段的行对象：去指标化（根源灭火）
+    r: str
+    boot_id: str
+    idx: int
+    seen_all: int
+
+def secure_read_metric(snap, key, phase, *, who, idx, boot_id, seen_all):
+    # 读指标权限收口：只允许 DECISION（⭐/投放点）
+    if key not in ("diff", "rate", "mean"):
+        raise RuntimeError(f"METRIC_KEY_ERROR: {key}")
+    if phase != PHASE_DECISION:
+        raise RuntimeError("METRIC_READ_FORBIDDEN: phase!=DECISION")
+    if who not in ("STAR", "DROP"):
+        raise RuntimeError("METRIC_READ_FORBIDDEN: who!=STAR/DROP")
+    if seen_all is None or int(seen_all) < 9:
+        raise RuntimeError("METRIC_READ_FORBIDDEN: seen_all<9")
+    if getattr(snap, "boot_id", None) != str(boot_id):
+        raise RuntimeError("METRIC_READ_FORBIDDEN: boot_id mismatch")
+    if getattr(snap, "idx", None) != int(idx):
+        raise RuntimeError("METRIC_READ_FORBIDDEN: idx mismatch")
+    src = getattr(snap, "source", None)
+    if who == "STAR" and src != "STAR_ROW":
+        raise RuntimeError("METRIC_READ_FORBIDDEN: STAR source!=STAR_ROW")
+    if who == "DROP" and src != "DROP_ROW":
+        raise RuntimeError("METRIC_READ_FORBIDDEN: DROP source!=DROP_ROW")
+    return getattr(snap, key)
+
+def secure_write_star_snapshot(row, phase, *, boot_id, rr, idx, seen_all, star_snapshot):
+    # ⭐快照唯一入口（只允许写一次）
+    if phase != PHASE_DECISION:
+        raise RuntimeError("SNAP_WRITE_FORBIDDEN: phase!=DECISION")
+    if rr == "T":
+        raise RuntimeError("SNAP_WRITE_FORBIDDEN: STAR rr==T")
+    if seen_all is None or int(seen_all) < 9:
+        raise RuntimeError("SNAP_WRITE_FORBIDDEN: STAR seen_all<9")
+    if star_snapshot is not None:
+        raise RuntimeError("SNAP_WRITE_FORBIDDEN: STAR snapshot duplicated")
+    # 只允许从 row 原始字段写入（原值），不允许兜底缺失->0
+    if row.get("diff") is None:
+        raise RuntimeError("SNAP_WRITE_FORBIDDEN: STAR diff missing")
+    return Snapshot(
+        diff=int(row.get("diff")),
+        rate=row.get("rate"),
+        mean=row.get("mean"),
+        boot_id=str(boot_id),
+        idx=int(idx),
+        seen_all=int(seen_all),
+        rr=str(rr),
+        source="STAR_ROW",
+    )
+
+def secure_write_drop_snapshot(row, phase, *, boot_id, rr, idx, seen_all):
+    # 投放点快照入口（每次实际投放前都可写一次；含T导致的重复投放前也要写）
+    if phase != PHASE_DECISION:
+        raise RuntimeError("SNAP_WRITE_FORBIDDEN: phase!=DECISION")
+    if rr == "T":
+        raise RuntimeError("SNAP_WRITE_FORBIDDEN: DROP rr==T")
+    if seen_all is None or int(seen_all) < 9:
+        raise RuntimeError("SNAP_WRITE_FORBIDDEN: DROP seen_all<9")
+    if row.get("diff") is None:
+        raise RuntimeError("SNAP_WRITE_FORBIDDEN: DROP diff missing")
+    return Snapshot(
+        diff=int(row.get("diff")),
+        rate=row.get("rate"),
+        mean=row.get("mean"),
+        boot_id=str(boot_id),
+        idx=int(idx),
+        seen_all=int(seen_all),
+        rr=str(rr),
+        source="DROP_ROW",
+    )
+
+def _assert_raises(fn, expected_substr):
+    try:
+        fn()
+    except Exception as e:
+        if expected_substr and expected_substr not in str(e):
+            raise RuntimeError(f"SELFTEST_EXPECTED='{expected_substr}' GOT='{e}'")
+        return
+    raise RuntimeError("SELFTEST_EXPECTED_RAISE_BUT_GOT_NONE")
+
+def run_hard_injection_selftest():
+    # 自检三证据：必须可阻断
+    ctx = {"phase": PHASE_SCAN}
+
+    # A) 非法指标访问模拟：EXECUTE 阶段读指标应阻断
+    dummy = Snapshot(diff=1, rate=None, mean=None, boot_id="BOOT", idx=0, seen_all=9, rr="B", source="STAR_ROW")
+    _phase_transition(ctx, PHASE_DECISION)
+    star = secure_write_star_snapshot({"diff": 1, "rate": None, "mean": None}, ctx["phase"], boot_id="BOOT", rr="B", idx=0, seen_all=9, star_snapshot=None)
+    _phase_transition(ctx, PHASE_EXECUTE)
+    _assert_raises(lambda: secure_read_metric(star, "diff", ctx["phase"], who="STAR", idx=0, boot_id="BOOT", seen_all=9), "phase!=DECISION")
+
+    # B) T行写快照应阻断
+    _phase_transition(ctx, PHASE_SETTLE)
+    _phase_transition(ctx, PHASE_DONE)
+    _assert_raises(lambda: secure_write_star_snapshot({"diff": 1, "rate": None, "mean": None}, PHASE_DECISION, boot_id="BOOT", rr="T", idx=0, seen_all=9, star_snapshot=None), "rr==T")
+
+    # C) 硬注入验证：阶段机非法回跳应阻断
+    ctx2 = {"phase": PHASE_SCAN}
+    _phase_transition(ctx2, PHASE_DECISION)
+    _phase_transition(ctx2, PHASE_EXECUTE)
+    _assert_raises(lambda: _phase_transition(ctx2, PHASE_DECISION), "illegal transition")
+
+    print("=== 正在执行硬注入自检 ===")
+    print("硬注入验证=通过✅")
+    print("非法指标访问模拟=已阻断✅")
+    print("T行写快照=已阻断✅")
+    print("=== 自检完成 ===")
+
 
 SCAN_MODE_LOCKED = "一次性扫描"
 
@@ -184,7 +347,7 @@ def load_all_boots(csv_files):
             print(f"进度: 已处理 {i}/{len(csv_files)} 个文件")
 
         rows = []
-        for enc in ("utf-8", "utf-8-sig", "gbk", "gb18030"):
+        for enc in ("utf-8-sig", "utf-8", "gb18030", "gbk"):
             try:
                 with open(fname, "r", encoding=enc) as f:
                     rows = list(csv.DictReader(f))
@@ -221,9 +384,34 @@ def load_all_boots(csv_files):
             if res not in ("B", "P", "T"):
                 continue
 
-            diff = safe_int(rr.get(col_diff, 0), 0)
-            rate = safe_float(rr.get(col_rate), None) if col_rate else None
-            mean = safe_float(rr.get(col_mean), None) if col_mean else None
+            # 严格区分 None 与 0：禁止缺失兜底为 0
+            raw_diff = rr.get(col_diff) if col_diff else None
+            if raw_diff is None or raw_diff == "" or str(raw_diff) == "None":
+                raise RuntimeError(f"DIFF_MISSING: file={fname} sub={cur_sub} row={seen_all+1}")
+            try:
+                diff = int(float(raw_diff))
+            except Exception:
+                raise RuntimeError(f"DIFF_PARSE_FAIL: file={fname} sub={cur_sub} raw='{raw_diff}'")
+
+            def _parse_float(raw_v, *, field):
+                global MEAN_MISSING_RAW, MEAN_PARSE_FAIL, RATE_MISSING_RAW, RATE_PARSE_FAIL
+                if raw_v is None or raw_v == "" or str(raw_v) == "None":
+                    if field == "mean":
+                        MEAN_MISSING_RAW += 1
+                    if field == "rate":
+                        RATE_MISSING_RAW += 1
+                    return None
+                try:
+                    return float(raw_v)
+                except Exception:
+                    if field == "mean":
+                        MEAN_PARSE_FAIL += 1
+                    if field == "rate":
+                        RATE_PARSE_FAIL += 1
+                    return None
+
+            rate = _parse_float(rr.get(col_rate) if col_rate else None, field="rate")
+            mean = _parse_float(rr.get(col_mean) if col_mean else None, field="mean")
 
             idx_in_boot = len(cur)
             seen_all += 1
@@ -234,6 +422,7 @@ def load_all_boots(csv_files):
                 "mean": mean,
                 "seen_all": seen_all,
                 "idx": idx_in_boot,
+                "boot_id": str(cur_sub),
             })
 
             end_flag = safe_int(rr.get(col_end, 0), 0) if col_end else 0
@@ -313,7 +502,7 @@ def _run_report(csv_files, title):
     print(title)
     print("=" * 60)
     print(f"TOTAL_BOOT       : {total_boots}")
-    print(BOOT_FILTER_ON_LABEL if BOOT_FILTER else BOOT_FILTER_OFF_LABEL)
+    print("靴级开关：" + (BOOT_FILTER_ON_LABEL if BOOT_FILTER else BOOT_FILTER_OFF_LABEL))
 
     if insufficient9:
         print(f"BOOT_LT9_ERROR   : {insufficient9}  (目标=0)")
@@ -323,8 +512,8 @@ def _run_report(csv_files, title):
     print(f"匹配次数    : {total_win}")
     print(f"不匹配次数  : {total_lose}")
     print(f"阈值击穿次数: {total_bust}")
-    print(f"单次平均增益: {total_profit / total_entry:.6f}" if total_entry else "单次平均增益: 0.000000")
-    print(f"总净值增益  : {total_profit:.2f}")
+    print(f"💶💶💶 单次平均增益: {total_profit / total_entry:.6f}" if total_entry else "💶💶💶 单次平均增益: 0.000000")
+    print(f"💶💶💶 总净值增益  : {total_profit:.2f}")
 
     if cont_stats:
         print("\n" + "-" * 60)
@@ -333,9 +522,20 @@ def _run_report(csv_files, title):
 
 
 def main():
+    # 启动首屏（锁死）：第一行必须是水印
+    print("🚀🚀🚀 🍔🍔🍔 🎰🎰🎰")
+    print("【强制自证输出】")
+    print("结构闸门：" + (STRUCT_SCAN_ON_LABEL if STRUCT_SCAN else STRUCT_SCAN_OFF_LABEL))
+    print("靴级开关：" + (BOOT_FILTER_ON_LABEL if BOOT_FILTER else BOOT_FILTER_OFF_LABEL))
+
+    # 自检必须在回测前完成，失败即退出
+    run_hard_injection_selftest()
+
     _audit_structure_slot_integrity()
     _audit_forbid_idx_offset()
+
     csv_files = sorted([f for f in os.listdir(".") if f.lower().endswith(".csv")])
+
     if VERIFY_SPLIT_ENABLE and len(csv_files) >= 2:
         mid = len(csv_files) // 2
         _run_report(csv_files[:mid], "验真阶段（前50%）")
