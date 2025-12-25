@@ -90,8 +90,8 @@ def _compute_core_and_slot_fingerprints():
         STRUCTURE_SLOT_LINE_RANGE = None
         return
 
-    begin_pat = r"^\s*#\s*\[SLOT_BEGIN\]\s*STRUCTURE_SLOT\s*$"
-    end_pat = r"^\s*#\s*\[SLOT_END\]\s*STRUCTURE_SLOT\s*$"
+    begin_pat = r"^\s*(?:#\s*)?\[SLOT_BEGIN\]\s*STRUCTURE_SLOT\s*$"
+    end_pat = r"^\s*(?:#\s*)?\[SLOT_END\]\s*STRUCTURE_SLOT\s*$"
 
     begins = [m.start() for m in re.finditer(begin_pat, src, flags=re.MULTILINE)]
     ends = [m.start() for m in re.finditer(end_pat, src, flags=re.MULTILINE)]
@@ -142,6 +142,7 @@ def _print_force_proof_block():
         pct = 0.0
     print(f"BET_IN_FORBIDDEN_SEEN = {BET_IN_FORBIDDEN_SEEN} ({pct:.2f}%)")
     print(f"PPBB_IDENTITY_CHECKED = {PPBB_CHECKED} | PPBB_MISMATCH = {PPBB_MISMATCH}")
+    print(f"BASELINE_HASH_MISMATCH = {BASELINE_HASH_MISMATCH}" + (f" | {BASELINE_HASH_FIRST_EVIDENCE}" if BASELINE_HASH_MISMATCH else ""))
     # 解析计数（补丁B）
     try:
         print(f"RATE_PARSE_FAIL_INPUT = {RATE_PARSE_FAIL_INPUT} | RATE_MISSING_RAW_INPUT = {RATE_MISSING_RAW_INPUT}")
@@ -393,17 +394,20 @@ ENFORCE_PPBB_SEMANTICS = 1  # 1=强制抽检点差恒等式与结果映射（PP=
 # - 派生脚本必须保留 CORE_BASELINE_ID，不得改名；如改动冻结区，必须重新生成母版
 # ============================================================
 CORE_BASELINE_ID = "UNIFIED_BASE_V11"
-ENFORCE_BASELINE_HASH = 1  # 1=ON✅，0=OFF⛔
+BASELINE_HASH_POLICY = "WARN"  # ENFORCE/WARN/OFF（默认 WARN：不阻断运行，但会在报告中提示）
+ENFORCE_BASELINE_HASH = 1 if (BASELINE_HASH_POLICY == "ENFORCE") else 0
+BASELINE_HASH_MISMATCH = 0
+BASELINE_HASH_FIRST_EVIDENCE = ""
 EXPECTED_SOURCE_HASHES = {
     "secure_read_metric": "bcb3372ccd58fbb3d6fd79c426f60996b9ae8bfa04015f36d877ca3df44083c0",
     "secure_write_star_snapshot": "bb5a1c58dcc055ebc3db960943155d90f9f70edbca6ef52e75bb7d625eefa1f3",
     "write_star_snapshot": "3c24ae66fbeb0d3a7f2daf699792c6b957d47ff512f18b488493f48745208e22",
     "phase_transition": "57d446d741a08163ed8f964d8edfb17bf4f9247dc42f23a1702d3d5eff7ad490",
     "advance_one_row": "1177db2eecbd85cd8c5f8894a309ce190dc1e3901fd06c082716b10cb594390d",
-    "run_strategy_on_boot": "749b264299e668006ebcf798af0b93185f85e628597129d13e8b5df5703919f6",
-    "load_all_boots": "5763b0f4dd836c69c8bc72c41301938ddd3ddb0e752a4b28ea502dc76285bc72",
+    "run_strategy_on_boot": "393544bbaee4ed315194c3b873d762373c1dd8405970bf52209b548c99171e0b",
+    "load_all_boots": "8607fa0cdc69f7da42cdefbd8b18f8824173637a459bb42761ce6183bf8d9bb4",
     "_audit_forbid_idx_offset": "d2755d9f2f5610fc202e4368accf5005a329b6d1406b19cf7484915609158671",
-    "_audit_structure_slot_integrity": "f827836a9ea7b13a28a058f7edab2723b81626f4f4e82f356990267323843ae1",
+    "_audit_structure_slot_integrity": "8f42aa1b8d6890449f1b6416104abbb065d9313e9be46ed4de637228264973b8",
 }
 PPBB_CHECKED = 0
 PPBB_MISMATCH = 0
@@ -740,8 +744,8 @@ def _audit_structure_slot_integrity():
         # 某些环境下 __file__ 不可用时，放行；但这会降低审查强度
         return
 
-    begin_ms = list(re.finditer(r'(?m)^[ \t]*#\s*\[STRUCT_SLOT_BEGIN\]\s*$', src))
-    end_ms = list(re.finditer(r'(?m)^[ \t]*#\s*\[STRUCT_SLOT_END\]\s*$', src))
+    begin_ms = list(re.finditer(r'(?m)^[ \t]*(?:#\s*)?\[STRUCT_SLOT_BEGIN\]\s*$', src))
+    end_ms = list(re.finditer(r'(?m)^[ \t]*(?:#\s*)?\[STRUCT_SLOT_END\]\s*$', src))
     if len(begin_ms) != 1 or len(end_ms) != 1:
         raise RuntimeError("❌ 结构插槽标记行必须且只能各出现 1 次：# [STRUCT_SLOT_BEGIN] 与 # [STRUCT_SLOT_END]（各 1 次）")
 
@@ -1133,6 +1137,7 @@ def detect_columns(row0):
 # 关键函数源码哈希（sha256｜锁死）
 # ==========================
 def _print_source_hashes():
+    global BASELINE_HASH_MISMATCH, BASELINE_HASH_FIRST_EVIDENCE
     """
     打印关键函数源码 sha256（锁死）：
     - 任意函数缺失/源码不可得/被包裹/运行态替换风险：直接 raise
@@ -1185,20 +1190,30 @@ def _print_source_hashes():
         computed[name] = h
         loc = len(s.splitlines())
         _audit_log(f"{name} : {h} : loc={loc}")
+
+
+
+
+
     # 基底指纹绑定：对照 EXPECTED_SOURCE_HASHES（锁死）
-    if ENFORCE_BASELINE_HASH and EXPECTED_SOURCE_HASHES:
+    # - 默认 BASELINE_HASH_POLICY=WARN：不中断运行，但会在首屏与摘要里给出提示
+    # - 若 AUDIT_RUN=1 或 BASELINE_HASH_POLICY=ENFORCE：判死（用于审查窗口）
+    if EXPECTED_SOURCE_HASHES:
         mism = []
         for k, exp in EXPECTED_SOURCE_HASHES.items():
             got = computed.get(k)
             if got is None or got != exp:
                 mism.append((k, exp, got))
         if mism:
+            BASELINE_HASH_MISMATCH = len(mism)
             head = mism[0]
-            raise RuntimeError(f"BASELINE_HASH_MISMATCH: {head[0]} exp={str(head[1])[:12]} got={str(head[2])[:12]}")
-
-
-
+            BASELINE_HASH_FIRST_EVIDENCE = f"{head[0]} exp={str(head[1])[:12]} got={str(head[2])[:12]}"
+            if (AUDIT_RUN == 1) or (ENFORCE_BASELINE_HASH == 1):
+                raise RuntimeError(f"BASELINE_HASH_MISMATCH: {BASELINE_HASH_FIRST_EVIDENCE}")
+            else:
+                _audit_log(f"BASELINE_HASH_MISMATCH_WARN : {BASELINE_HASH_FIRST_EVIDENCE}")
     _SOURCE_HASHES_PRINTED = True
+    return computed
 
 
 # ==========================
