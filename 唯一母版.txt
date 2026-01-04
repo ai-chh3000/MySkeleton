@@ -32,11 +32,26 @@ SAMPLE_PROBE_K = 3        # 抽样条数
 SAMPLE_PROBE_PREFIX = "📌"
 SAMPLE_PROBE_RUN_NONCE = int.from_bytes(os.urandom(8), "big")  # 每次运行不同；仅用于抽样排序
 _SAMPLE_PROBE_BEST_BY_FILE = {}  # file -> (score, file, sub_batch, idx)
+_SAMPLE_PROBE_FALLBACK = None  # (base, sub_batch, idx)
 
 def _sample_probe_u64(s: str) -> int:
     # 稳定哈希：跨进程/跨平台可复现；仅用于抽样排序（不参与任何逻辑）
     h = hashlib.md5(s.encode('utf-8'), usedforsecurity=False).hexdigest()
     return int(h[:16], 16)
+
+def _sample_probe_fallback_update(file_name, sub_batch, idx) -> None:
+    """抽样兜底：即使无⭐/无ENTRY，也保证至少有一条📌可定位。"""
+    global _SAMPLE_PROBE_FALLBACK
+    if not SAMPLE_PROBE_ENABLE:
+        return
+    if not file_name:
+        return
+    try:
+        base = os.path.basename(str(file_name))
+        _SAMPLE_PROBE_FALLBACK = (base, sub_batch, idx)
+    except Exception:
+        return
+
 
 def _sample_probe_update(file_name, sub_batch, idx, boot_id=None) -> None:
     """冻结区抽样候选更新：每文件只保留 1 条（最小哈希者）。"""
@@ -69,7 +84,7 @@ def _sample_probe_emit() -> None:
     for _, base, sb, n in items:
         print(f"{SAMPLE_PROBE_PREFIX}|f={base}|SB={sb}|N={n}")
 
-BUILD_TAG = "V30_UPGRADED_fix_bootid_v32_buildtag_fix|TAG20260104-02"
+BUILD_TAG = "V30_UPGRADED_fix_bootid_v32_buildtag_fix|TAG20260105-01|BOOT_START_LOCK_SW|DUAL_SEEN|B1_RESET_STEP1|RUNLEN_LOCK_S|R_TRUTH|TEMP_INIT_FIRST|HYST3|DIFF_SIGN_ONLY"
 # 指标键（锁死）
 METRIC_KEYS = {"diff", "rate", "mean", "rate_raw", "mean_raw"}
 
@@ -566,7 +581,7 @@ _SOURCE_HASHES_PRINTED = False
 
 # 输出静默开关：1=静默（仅保留主报告+强制自证；不打印表头自证/L1分布/连续统计），0=详细
 # 🍀覆盖锚点003_静默开关（0=全量报告默认显示；1=只保留最简结果）
-SILENT_MODE = 0
+SILENT_MODE = 1
 
 # 审查跑开关（时间管理局｜锁死）
 # 规则：当 AUDIT_RUN=1 时，必须无条件输出“审查跑必出块”（含 L1 三块锁死标题），不受 SILENT_MODE 影响。
@@ -602,10 +617,10 @@ def _flush_audit_log(tag: str = ""):
     _AUDIT_LOG_BUF = []
 
 # 靴级开关（锁死）：仅限制“实际落注”是否允许发生在前8口（seen_all=1..8）
-# BOOT_FILTER=ON✅：禁下注 seen_all=1..8；第9口起允许
+# BOOT_FILTER=ON✅：禁下注 seen_shift=1..8；第9口起允许
 # BOOT_FILTER=OFF⛔：靴首允许下注
-BOOT_FILTER = 1  # 1=ON✅，0=OFF⛔
-BOOT_FILTER_TEXT = "BOOT_FILTER=ON✅(禁下注 seen_all=1..8)" if BOOT_FILTER else "BOOT_FILTER=OFF⛔(靴首允许下注)"
+BOOT_FILTER = 0  # 1=ON✅，0=OFF⛔
+BOOT_FILTER_TEXT = "BOOT_FILTER=ON✅(禁下注 seen_shift=1..8)" if BOOT_FILTER else "BOOT_FILTER=OFF⛔(靴首允许下注)"
 
 # BOOT_FILTER 禁区处理策略（冻结区真源｜锁死）
 # 0=SKIP_STAR：命中禁区♻⭐只跳过该⭐，继续在同一靴寻找下一颗♻⭐（非顺延）
@@ -635,7 +650,7 @@ STRUCT_SCAN_TEXT = "STRUCT_SCAN=ON✅(结构扫描开启)" if STRUCT_SCAN else "
 # - 插槽必须可被边界标识唯一定位：0个或>1个均判死
 # ============================================================
 STRUCTURE_SLOT_NAME = "STRUCTURE_SLOT"
-STRUCTURE_SLOT_VERSION = "V1"
+STRUCTURE_SLOT_VERSION = "V2"
 CORE_BASE_FINGERPRINT = None
 STRUCTURE_SLOT_FINGERPRINT = None
 STRUCTURE_SLOT_LINE_RANGE = None  # (begin_line, end_line)
@@ -644,10 +659,9 @@ STRUCTURE_SLOT_LINE_RANGE = None  # (begin_line, end_line)
 # [SLOT_BEGIN] STRUCTURE_SLOT
 # [STRUCT_SLOT_BEGIN]
 # 输出策略：本插槽仅放“结构配置表”；算法在冻结区（避免写手改偏）
-STRUCT_SUMMARY_LINE = "结构摘要：S≥3 → W1-2 → S⭐"
-
 # 结构配置表（覆盖区可改｜只填这一张表）
-# 列：step | side(S/W) | min_len | max_len | mark(可空；⭐表示结构终点)
+# 列：step | side(S/W/B/P) | min_len | max_len | mark(⭐=结构终点)
+# v2 锁死：⭐ 必须唯一且出现在最后一行；覆盖区不得写任何扫描/门禁逻辑
 # 默认结构：S≥3 → W1-2 → S⭐
 STRUCT_CONFIG_TEXT = """step	side	min_len	max_len	mark
 1	S	3	999	
@@ -662,7 +676,7 @@ def scan_structure(records):
 # [SLOT_END] STRUCTURE_SLOT
 # 🍀覆盖锚点001_结构插槽_END
 
-STRUCT_DEF_HASH = hashlib.md5(STRUCT_SUMMARY_LINE.encode("utf-8")).hexdigest()[:8]
+STRUCT_DEF_HASH = None  # AUTO（由 STRUCT_CONFIG_TEXT + Anchor 计算）
 _STRUCT_SUMMARY_PRINTED = False
 
 # ==========================
@@ -675,7 +689,17 @@ SW_RULE = {
     "VALID_R": ("B", "P"),      # 仅BP参与结构段长
     "IGNORE_T": True,           # T 不参与、不打断
     "ZERO_DIFF_INVALID": True,  # 点差==0 不参与、不打断
+
+    # 未定义期 temp_S 口径（锁死｜方案B）
+    "TEMP_INIT": "FIRST_VALID_WINNER",  # 首个有效口赢家即 temp_S
+    "HYST_SWITCH": 3,                   # 被反超阈值：对方领先>=3才切换
+    "WINNER_SOURCE": "DIFF_SIGN",       # 胜方只认 diff 符号：<0=P >0=B =0=T
 }
+
+# Anchor（锚点）口径（冻结区真源｜锁死）
+# - FROM_BOOT_START_LOCK_SW（默认）：从靴首开始扫描；S/W 由“谁先出现连续有效口段长>=3”锁定为最终强方
+STRUCT_ANCHOR_MODE = "FROM_BOOT_START_LOCK_SW"
+
 
 def _boot_filter_rule():
     """靴级规则（冻结区真源）"""
@@ -706,36 +730,48 @@ def _cfg_parse_int(x):
         return None
 
 def _cfg_is_valid_struct_row(rec: dict):
-    """结构行有效性：仅 B/P 且 点差可解析且非0。"""
-    r = (rec.get("r") or "").strip()
-    if r not in SW_RULE["VALID_R"]:
-        return False
+    """结构行有效性：以点差推胜负（用户口径：diff<0=P, diff>0=B, diff==0=T）。
+    仅当 diff 可解析且非0 时视为有效口；T/0 只位移不计段长。
+    """
     d = _cfg_parse_int(rec.get("diff"))
     if d is None:
         return False
     if SW_RULE["ZERO_DIFF_INVALID"] and d == 0:
         return False
-    return True
+    # 赢家侧从 diff 推导，避免 r/Exhaust 解析异常导致误判为无效口
+    rec["_r_by_diff"] = "B" if d > 0 else ("P" if d < 0 else "T")
+    return rec["_r_by_diff"] in ("B", "P")
 
 def _cfg_parse_struct_table(text: str):
-    """解析覆盖区结构表。要求：3行，形态固定：S, W, S⭐。"""
+    """解析覆盖区结构表（STRUCT-Lang v2）。
+    允许：N 行（N>=1），字段：step | side | min_len | max_len | mark
+    side：S/W（强弱方）或 B/P（绝对方）
+    v2 锁死校验：
+      - step 必须连续递增（1..N）
+      - min/max 为正整数且 min<=max
+      - ⭐ 必须唯一且出现在最后一行
+    """
     if text is None:
         raise RuntimeError("STRUCT_CONFIG_INVALID: empty")
-    lines = []
+    raw_lines = []
     for raw in str(text).splitlines():
         s = raw.strip()
         if not s:
             continue
         if s.startswith("#"):
             continue
-        lines.append(s)
-    if not lines:
+        raw_lines.append(s)
+    if not raw_lines:
         raise RuntimeError("STRUCT_CONFIG_INVALID: empty")
+
     # 跳过表头行（包含 step/side/min_len/max_len）
-    if ("step" in lines[0].lower()) and ("side" in lines[0].lower()):
-        lines = lines[1:]
+    if ("step" in raw_lines[0].lower()) and ("side" in raw_lines[0].lower()):
+        raw_lines = raw_lines[1:]
+    if not raw_lines:
+        raise RuntimeError("STRUCT_CONFIG_INVALID: empty")
+
     rows = []
-    for s in lines:
+    for s in raw_lines:
         parts = [p for p in re.split(r"\s+|\t+", s.strip()) if p != ""]
         if len(parts) < 4:
             continue
@@ -746,126 +782,372 @@ def _cfg_parse_struct_table(text: str):
         mark = str(parts[4]).strip() if len(parts) >= 5 else ""
         if step is None or min_len is None or max_len is None:
             continue
-        rows.append({"step": int(step), "side": side, "min_len": int(min_len), "max_len": int(max_len), "mark": mark})
+        rows.append({
+            "step": int(step),
+            "side": side,
+            "min_len": int(min_len),
+            "max_len": int(max_len),
+            "mark": mark,
+        })
+
     rows.sort(key=lambda x: x["step"])
-    if len(rows) < 3:
-        raise RuntimeError("STRUCT_CONFIG_INVALID: need>=3")
-    a, b, c = rows[0], rows[1], rows[2]
-    if a["side"] != "S" or b["side"] != "W" or c["side"] != "S":
-        raise RuntimeError("STRUCT_CONFIG_INVALID: expect S/W/S")
-    # ⭐为终点标记：不强制一定写⭐，但默认提示；缺失时仍按第3步作为终点
-    return a, b, c
+    if len(rows) < 1:
+        raise RuntimeError("STRUCT_CONFIG_INVALID: need>=1")
 
-def _frozen_scan_structure(records, struct_config_text):
-    """冻结区结构扫描（配置驱动）
-    返回：("STRUCT_OK"|"STRUCT_FAIL", star_idx_or_None, strong_side_or_None, info)
+    # step 连续递增（1..N）
+    for i, r in enumerate(rows, 1):
+        if r["step"] != i:
+            raise RuntimeError("STRUCT_CONFIG_INVALID: step_not_continuous")
+
+    # 字段校验
+    for r in rows:
+        if r["side"] not in ("S", "W", "B", "P"):
+            raise RuntimeError("STRUCT_CONFIG_INVALID: bad_side")
+        if r["min_len"] <= 0 or r["max_len"] <= 0:
+            raise RuntimeError("STRUCT_CONFIG_INVALID: minmax_must_be_positive")
+        if r["min_len"] > r["max_len"]:
+            raise RuntimeError("STRUCT_CONFIG_INVALID: min_gt_max")
+
+    # ⭐ 唯一且在最后一行（v2 锁死）
+    star_steps = [r["step"] for r in rows if ("⭐" in (r.get("mark") or ""))]
+    if len(star_steps) != 1:
+        raise RuntimeError("STRUCT_CONFIG_INVALID: star_must_be_unique")
+    if star_steps[0] != rows[-1]["step"]:
+        raise RuntimeError("STRUCT_CONFIG_INVALID: star_must_be_last")
+
+    return rows
+
+def _cfg_norm_struct_text(text: str) -> str:
+    """结构表规范化文本（用于 HASH）。"""
+    if text is None:
+        return ""
+    lines = []
+    for raw in str(text).splitlines():
+        s = raw.strip()
+        if not s:
+            continue
+        if s.startswith("#"):
+            continue
+        lines.append(s)
+    if lines and ("step" in lines[0].lower()) and ("side" in lines[0].lower()):
+        lines = lines[1:]
+    return "\n".join(lines).strip()
+
+def _cfg_struct_expr(rows) -> str:
+    """结构表达（用于打印）：例 S≥3 → W1-2 → S⭐"""
+    parts = []
+    for i, r in enumerate(rows, 1):
+        side = r["side"]
+        mn = int(r["min_len"])
+        mx = int(r["max_len"])
+        is_last = (i == len(rows))
+        seg = ""
+        if (not is_last) or (not (mn == 1 and mx >= 999)):
+            if mx >= 999:
+                seg = f"≥{mn}"
+            elif mn == mx:
+                seg = f"{mn}"
+            else:
+                seg = f"{mn}-{mx}"
+        mark = "⭐" if is_last else ""
+        parts.append(f"{side}{seg}{mark}")
+    return " → ".join(parts)
+
+def _cfg_struct_hash(text: str, anchor_mode: str) -> str:
+    """结构 HASH（含 Anchor）。"""
+    norm = _cfg_norm_struct_text(text)
+    payload = (str(anchor_mode or "") + "\n" + norm).encode("utf-8")
+    return hashlib.md5(payload).hexdigest()[:8]
+
+def _cfg_config_uses_sw(rows) -> bool:
+    return any((r.get("side") in ("S", "W")) for r in (rows or []))
+
+def _cfg_anchor_define_after_s_defined(records):
+    """定义 Anchor：S_DEFINED_IDX 与 strong_abs（B/P）。
+    口径锁死（靴首扫描版）：
+      - strong_abs：谁先出现“连续有效口段长（RUNLEN）>=3”，谁就是 S（强）
+      - S_DEFINED_IDX：该 RUNLEN 达到第3口所在的 records 行号（0-based idx）
+      - 只计有效口：r∈{B,P} 且 diff!=0；T/0 只位移
     """
-    s1, s2, s3 = _cfg_parse_struct_table(struct_config_text)
-
-    info = {
-        "forbidden_star_cnt": 0,
-        "forbidden_star_first_seen": None,
-        "fail_reason": None,
-        "s1": s1,
-        "s2": s2,
-        "s3": s3,
-    }
-
-    # 状态机：先找“强段>=S.min”，再找“弱段=W[min..max]”，再找“强⭐”
     run_side = None
     run_len = 0
-    strong = None
-    weak = None
-    w_len = 0
-    state = "FIND_S"
+    for i, rec in enumerate(records or []):
+        if not _cfg_is_valid_struct_row(rec):
+            continue
+        r = (rec.get("r") or "").strip()
+        if r == run_side:
+            run_len += 1
+        else:
+            run_side = r
+            run_len = 1
+        if run_len >= 3:
+            return i, run_side
+    return None, None
+
+def scan_by_config_v2(records, rows, anchor_mode, sw_rule):
+    """冻结区：配置驱动结构扫描器 v2（多段｜靴首扫描版｜RUNLEN）。
+
+    返回：("STRUCT_OK"|"STRUCT_FAIL", entry_star_idx_or_None, strong_abs_or_None, info)
+
+    口径锁死：
+    - 扫描从 records 第一行开始（不做 Anchor 截断）
+    - strong_abs：谁先出现“连续有效口段长（RUNLEN）>=3”，谁就是 S（强）；之后不再切换
+    - 未定义期：temp_S/temp_W=当前累计领先方（有效口累计 cntB/cntP；平手 KEEP_LAST；首个有效口兜底）
+      且 temp_S 一旦切换：B1 重置到 step1（防段内换边漂移）
+    - 段长累计：结构段长按 RUNLEN（连续同侧有效口）；T/0 只位移不计段长、不打断
+    - BOOT_FILTER 禁区：按位移口 seen_shift=1..8（含T/0），仅影响 ENTRY♻⭐；RAW♻⭐不受影响
+    - 段边界：以“侧变/mismatch”作为自然边界；达到 min_len 不会在同一口强行跨段
+    """
+    info = {
+        "fail_reason": None,
+
+        # RAW / ENTRY（双♻⭐）
+        "raw_star_idx": None,
+        "entry_star_idx": None,
+
+        # 禁区作废（必须出现）
+        "skipped_forbidden_star_cnt": 0,     # 禁区命中的⭐被作废次数
+        "forbidden_star_cnt": 0,             # 禁区命中总次数（含ABORT/其它）
+        "forbidden_star_first_seen": None,   # 首次禁区命中的 RAW♻⭐ idx
+
+        # 状态重置计数（必须出现）
+        "reset_to_step1_cnt": 0,             # 所有回到 step1 的次数（含禁区/侧变/溢出等）
+        "reset_forbidden_cnt": 0,            # 禁区作废导致的重置次数（应与 skipped_forbidden_star_cnt 一致）
+        "reset_side_switch_cnt": 0,          # temp_S 发生切换导致的重置次数
+
+        # temp_S 自证
+        "temp_init_idx": None,               # temp_S 首次建立的 idx（首个有效口）
+        "temp_switch_cnt": 0,                # temp_S 切换次数（被反超>=阈值）
+
+        # 审计字段
+        "anchor_mode": anchor_mode,
+        "struct_hash": _cfg_struct_hash(STRUCT_CONFIG_TEXT, anchor_mode),
+        "struct_expr": _cfg_struct_expr(rows),
+        "s_defined_idx": None,
+    }
+
+    step_i = 0          # 0-based
+    seg_len = 0
+
+    # strong_abs / weak_abs：最终 S/W（绝对方）
+    strong_abs = None
+    weak_abs = None
+
+    # 未定义期 temp（领先方）
+    cntB = 0
+    cntP = 0
+    keep_last_leader = None  # temp_S（绝对方 B/P）
+
+    # 用于锁定 strong_abs 的 RUNLEN（绝对方）
+    run_side = None
+    run_len = 0
 
     rule = BOOT_FILTER_RULE
     forbidden_lo, forbidden_hi = rule["forbidden_lo"], rule["forbidden_hi"]
+    forbidden_action = rule.get("forbidden_action", "SKIP_STAR")
 
-    for rec in records or []:
-        if not _cfg_is_valid_struct_row(rec):
-            continue
+    def _opp(bp):
+        return "P" if bp == "B" else ("B" if bp == "P" else None)
 
-        r = rec.get("r")
-        # 更新段长
-        if r != run_side:
-            run_side = r
-            run_len = 1
-        else:
-            run_len += 1
+    def _expected_abs(side: str):
+        # 绝对方
+        if side in ("B", "P"):
+            return side
+        # 强弱方
+        if side in ("S", "W"):
+            if strong_abs is not None:
+                return strong_abs if side == "S" else weak_abs
+            # 未定义期：依赖 temp_S/temp_W
+            if keep_last_leader is None:
+                return None
+            return keep_last_leader if side == "S" else _opp(keep_last_leader)
+        return None
 
-        if state == "FIND_S":
-            if run_len >= s1["min_len"]:
-                strong = run_side
-                weak = "P" if strong == "B" else "B"
-                state = "WAIT_W"
-                w_len = 0
-            continue
+    def _reset(reason: str = None):
+        nonlocal step_i, seg_len
+        step_i = 0
+        seg_len = 0
+        # 计数：用于验收“禁区命中必须重置”
+        info["reset_to_step1_cnt"] += 1
+        if reason == "FORBIDDEN":
+            info["reset_forbidden_cnt"] += 1
+        elif reason == "SIDE_SWITCH":
+            info["reset_side_switch_cnt"] += 1
 
-        if strong is None or weak is None:
-            state = "FIND_S"
-            continue
+    def _maybe_commit_star(cand_star_idx, seen_shift):
+        # RAW♻⭐：记录第一颗纯结构星（无论是否被禁区跳过）
+        if info["raw_star_idx"] is None:
+            info["raw_star_idx"] = cand_star_idx
 
-        if state == "WAIT_W":
-            if r == weak:
-                state = "IN_W"
-                w_len = 1
-            # r==strong：继续等弱段
-            continue
-
-        # state == IN_W
-        if r == weak:
-            w_len += 1
-            if w_len > s2["max_len"]:
-                # 弱段过长：重置，允许寻找新强段（口径与旧版一致）
-                state = "FIND_S"
-                strong = None
-                weak = None
-                w_len = 0
-                # 立即复用当前 run_len 继续判断（不吞当前信息）
-                if run_len >= s1["min_len"]:
-                    strong = run_side
-                    weak = "P" if strong == "B" else "B"
-                    state = "WAIT_W"
-                continue
-            continue
-
-        # r == strong
-        if w_len < s2["min_len"]:
-            # 弱段太短：视为没进入弱段，继续等
-            state = "WAIT_W"
-            w_len = 0
-            continue
-
-        # 命中⭐（候选）
-        star_idx = rec.get("idx")
-        sa = _cfg_parse_int(rec.get("seen_all"))
-
-        # BOOT_FILTER=ON：若⭐落禁区，按规则处理（默认跳过该⭐继续扫下一颗）
-        if BOOT_FILTER and (sa is not None) and (forbidden_lo <= sa <= forbidden_hi):
+        if BOOT_FILTER and (forbidden_lo <= seen_shift <= forbidden_hi):
             info["forbidden_star_cnt"] += 1
             if info["forbidden_star_first_seen"] is None:
-                info["forbidden_star_first_seen"] = sa
-            if rule["forbidden_action"] == "ABORT_BOOT":
+                info["forbidden_star_first_seen"] = cand_star_idx
+
+            if forbidden_action == "ABORT_BOOT":
                 info["fail_reason"] = "FORBIDDEN_ABORT"
-                return "STRUCT_FAIL", None, None, info
-            # SKIP_STAR：跳过该⭐，继续在同一靴找下一颗⭐（非顺延）
-            state = "WAIT_W"
-            w_len = 0
+                return "STRUCT_FAIL", None, strong_abs, info
+
+            # SKIP_STAR：该⭐作废，重置结构匹配状态，继续找下一颗（换事件）
+            info["skipped_forbidden_star_cnt"] += 1
+            _reset("FORBIDDEN")
+            return None
+
+        info["entry_star_idx"] = cand_star_idx
+        return "STRUCT_OK", cand_star_idx, strong_abs, info
+
+    for i, rec in enumerate(records or []):
+        idx = i                 # records 行号（0-based）
+        seen_shift = i + 1      # 位移口（含T/0）
+
+        if not _cfg_is_valid_struct_row(rec):
+            # 无效口：只位移，不计段长，不打断
             continue
 
-        info["star_seen_all"] = sa
-        info["star_mark"] = s3.get("mark") or ""
-        return "STRUCT_OK", star_idx, strong, info
+        # 胜方只认 diff 符号（锁死）：<0=P >0=B =0/T
+        d = _cfg_parse_int(rec.get("diff"))
+        if d is None:
+            r_abs = "T"
+        else:
+            r_abs = "B" if d > 0 else ("P" if d < 0 else "T")
+        rec["_r_by_diff"] = r_abs
 
-    # 扫描结束：失败归因
-    if info["forbidden_star_cnt"] > 0 and state != "FIND_S":
+        # 1) RUNLEN：用于锁定 strong_abs（谁先连续>=3）
+        if r_abs == run_side:
+            run_len += 1
+        else:
+            run_side = r_abs
+            run_len = 1
+
+        if strong_abs is None and run_len >= 3:
+            strong_abs = run_side
+            weak_abs = _opp(strong_abs)
+            info["s_defined_idx"] = idx
+
+        # 2) 未定义期 temp_S（锁死｜方案B + 迟滞阈值）
+        # 只计有效口累计：d=cntB-cntP
+        if r_abs == "B":
+            cntB += 1
+        elif r_abs == "P":
+            cntP += 1
+
+        d_bp = cntB - cntP
+
+        # 方案B：首个有效口赢家即建立 temp_S（不等待阈值）
+        if keep_last_leader is None:
+            keep_last_leader = r_abs
+            info["temp_init_idx"] = idx
+        else:
+            leader = keep_last_leader
+
+            # 迟滞切换：只有被反超到对方领先>=HYST_SWITCH 才允许切换
+            thr = int(SW_RULE.get("HYST_SWITCH", 3))
+            if keep_last_leader == "B" and d_bp <= -thr:
+                leader = "P"
+            elif keep_last_leader == "P" and d_bp >= thr:
+                leader = "B"
+
+            if leader != keep_last_leader:
+                info["temp_switch_cnt"] += 1
+                # 未锁定期侧变：必须回到 step1（防段内换边漂移）
+                if strong_abs is None:
+                    _reset("SIDE_SWITCH")
+                keep_last_leader = leader
+
+        # 一个有效口可能触发“段结束/跨段/重置”，因此用 while 允许同一口被多次归属（仅在 mismatch 时）
+        while True:
+            cur = rows[step_i]
+            exp = _expected_abs(cur["side"])
+            if exp is None:
+                _reset()
+                break
+
+            if r_abs == exp:
+                seg_len += 1
+
+                # 超上限：重置并尝试以当前口作为新起点
+                if seg_len > int(cur["max_len"]):
+                    _reset()
+                    # 允许当前口作为新起点（继续 while）
+                    continue
+
+                # ⭐：最后一段达到 min_len（允许“最早满足即⭐”）
+                if step_i == (len(rows) - 1) and seg_len >= int(cur["min_len"]):
+                    res = _maybe_commit_star(idx, seen_shift)
+                    if res is not None:
+                        return res
+                    # SKIP_STAR：继续下一口
+                    break
+
+                # 在 RUNLEN 口径下：达到 min_len 不会在同一口强行跨段（避免“同一口被两段同时消费”）
+                break
+
+            # mismatch（侧变/不匹配）：当前口不属于本段，尝试结束本段并把当前口归属到下一段/新起点
+            if seg_len == 0:
+                # 尚未进入段：允许回到 step1 重新解释
+                if step_i != 0:
+                    _reset()
+                    continue
+                # step1 都不匹配：本口无法作为起点
+                break
+
+            # 段已开始：检查本段是否满足最短
+            if seg_len < int(cur["min_len"]):
+                # 段太短：重置，并尝试当前口作为新的起点
+                _reset()
+                continue
+
+            # 段满足：进入下一段，并用同一口重试（该口属于下一段的首口）
+            step_i += 1
+            if step_i >= len(rows):
+                _reset()
+                break
+            seg_len = 0
+            continue
+
+    if info["forbidden_star_cnt"] > 0:
         info["fail_reason"] = "ONLY_FORBIDDEN"
     else:
         info["fail_reason"] = "NO_CANDIDATE"
-    return "STRUCT_FAIL", None, None, info
+    return "STRUCT_FAIL", None, strong_abs, info
 
+def _get_struct_summary_line_and_hash():
+    """给报告用：结构摘要行 + HASH（含 Anchor）。"""
+    try:
+        rows = _cfg_parse_struct_table(STRUCT_CONFIG_TEXT)
+        expr = _cfg_struct_expr(rows)
+        h = _cfg_struct_hash(STRUCT_CONFIG_TEXT, STRUCT_ANCHOR_MODE)
+        return f"结构摘要：{expr} | HASH={h}", h
+    except Exception:
+        return "结构摘要：<PARSE_FAIL>", "NA"
+def _frozen_scan_structure(records, struct_config_text):
+    """冻结区结构扫描（配置驱动 v2：多段 + Anchor）
+    返回：("STRUCT_OK"|"STRUCT_FAIL", star_idx_or_None, strong_side_or_None, info)
+    - star_idx：ENTRY♻⭐（靴级门禁后可入场的⭐；兼容旧字段）
+    - info 同时包含 RAW♻⭐ 与 HASH 等审计字段
+    """
+    anchor_mode = STRUCT_ANCHOR_MODE
 
+    try:
+        rows = _cfg_parse_struct_table(struct_config_text)
+    except Exception as e:
+        return "STRUCT_FAIL", None, None, {
+            "fail_reason": f"PARSE_FAIL:{e}",
+            "forbidden_star_cnt": 0,
+            "forbidden_star_first_seen": None,
+        }
+
+    st, entry_star_idx, strong_abs, info = scan_by_config_v2(records, rows, anchor_mode, SW_RULE)
+    if st != "STRUCT_OK":
+        return "STRUCT_FAIL", None, strong_abs, info
+
+    entry_star_idx = info.get("entry_star_idx", entry_star_idx)
+    info["raw_star_idx"] = info.get("raw_star_idx")
+    info["entry_star_idx"] = entry_star_idx
+    info["struct_hash"] = info.get("struct_hash") or _cfg_struct_hash(struct_config_text, anchor_mode)
+    info["struct_expr"] = info.get("struct_expr") or _cfg_struct_expr(rows)
+
+    return "STRUCT_OK", entry_star_idx, strong_abs, info
 # ==========================
 # 打印格式工具（锁死）
 # ==========================
@@ -971,11 +1253,15 @@ def _audit_structure_slot_integrity() -> None:
     结构插槽完整性自检（开发期防误伤版本）：
 
     1) 只以「覆盖锚点001」判定结构插槽边界（避免说明文字/注释误判）：
-       - # 🍀覆盖锚点001_结构插槽_BEG
-       - # 🍀覆盖锚点001_结构插槽_EN
+       - # 🍀覆盖锚点001_结构插槽_BEGIN
+       - # 🍀覆盖锚点001_结构插槽_END
 
-    2) 插槽内部必须且只能包含 1 个 scan_structure 定义与 1 条 STRUCT_SUMMARY_LINE 常量。
-       这两项用于保证后续统计/打印稳定。
+    2) 插槽内部必须且只能包含：
+       - 1 个 scan_structure 定义
+       - 1 条 STRUCT_CONFIG_TEXT 常量
+
+    3) 覆盖区禁止出现任何扫描/门禁逻辑痕迹（硬审计）：
+       - continue / for / while / BOOT_FILTER / seen_all / range(
     """
     try:
         with open(__file__, "r", encoding="utf-8") as f:
@@ -990,40 +1276,37 @@ def _audit_structure_slot_integrity() -> None:
     begin_pat = r"^[ \t]*#\s*" + re.escape(ANCHOR001_BEGIN) + r".*$"
     end_pat   = r"^[ \t]*#\s*" + re.escape(ANCHOR001_END)   + r".*$"
 
-    begin_ms = list(re.finditer(begin_pat, src, flags=re.MULTILINE))
-    end_ms = list(re.finditer(end_pat, src, flags=re.MULTILINE))
+    begin_ms = [i for i, line in enumerate(lines) if re.match(begin_pat, line)]
+    end_ms   = [i for i, line in enumerate(lines) if re.match(end_pat, line)]
 
     if len(begin_ms) != 1 or len(end_ms) != 1:
-        # 失败时给最小证据（只在异常时打印）
-        lines = src.splitlines()
-        begin_hits = [i+1 for i,ln in enumerate(lines) if re.match(begin_pat, ln)]
-        end_hits = [i+1 for i,ln in enumerate(lines) if re.match(end_pat, ln)]
         raise RuntimeError(
             "❌ 结构插槽锚点行必须且只能各出现 1 次："
-            f"BEGIN={len(begin_ms)}({begin_hits}) END={len(end_ms)}({end_hits})"
+            f"BEGIN={len(begin_ms)}({begin_ms}) END={len(end_ms)}({end_ms})"
         )
-
-    b = begin_ms[0]
-    e = end_ms[0]
-    if e.start() <= b.start():
+    begin_line = begin_ms[0]
+    end_line = end_ms[0]
+    if end_line <= begin_line:
         raise RuntimeError("❌ 结构插槽锚点顺序错误：END 在 BEGIN 之前")
 
-    begin_line = src[:b.start()].count("\n") + 1
-    end_line = src[:e.start()].count("\n") + 1
-    src_lines = src.splitlines()
-    slot_lines = src_lines[begin_line: end_line-1]
+    slot_lines = lines[begin_line:end_line]
     slot_text = "\n".join(slot_lines)
 
-    # 插槽内部强约束：必须包含 scan_structure 与 STRUCT_SUMMARY_LINE
     scan_hits = re.findall(r"^\s*def\s+scan_structure\s*\(", slot_text, flags=re.MULTILINE)
-    sum_hits = re.findall(r"^\s*STRUCT_SUMMARY_LINE\s*=", slot_text, flags=re.MULTILINE)
+    cfg_hits  = re.findall(r"^\s*STRUCT_CONFIG_TEXT\s*=", slot_text, flags=re.MULTILINE)
 
-    if len(scan_hits) != 1 or len(sum_hits) != 1:
+    if len(scan_hits) != 1 or len(cfg_hits) != 1:
         raise RuntimeError(
             "❌ 结构插槽内容异常："
-            f"scan_structure={len(scan_hits)} STRUCT_SUMMARY_LINE={len(sum_hits)}"
-            f" | slot_lines={begin_line+1}..{end_line-1}"
+            f"scan_structure={len(scan_hits)} STRUCT_CONFIG_TEXT={len(cfg_hits)}"
+            f" | slot_lines={begin_line+1}..{end_line}"
         )
+
+    # 覆盖区硬审计：禁止扫描/门禁逻辑痕迹
+    forbid = ["continue", " for ", " while ", "BOOT_FILTER", "seen_all", "range("]
+    hit = [s for s in forbid if s in slot_text]
+    if hit:
+        raise RuntimeError("❌ 覆盖区出现禁止逻辑片段：" + ",".join(hit))
 
     # 追加：覆盖锚点002（报告汇总）唯一性审计（全文件硬要求）
     ANCHOR002_BEGIN = "🍀覆盖锚点002_报告汇总_" "BEGIN"
@@ -1037,7 +1320,6 @@ def _audit_structure_slot_integrity() -> None:
             "❌ 报告汇总锚点行必须且只能各出现 1 次："
             f"BEGIN={len(begin_ms2)}({begin_ms2}) END={len(end_ms2)}({end_ms2})"
         )
-
 def _update_run(run_side, run_len, r):
     # 状态 T 位移零偏差：run_side/run_len 不变  # [cite: 13]
     if r == "T":
@@ -1877,6 +2159,16 @@ def run_strategy_on_boot(records):
     """
     if not records or not STRUCT_SCAN:
         return None
+
+    # 📌 抽样兜底：每靴至少留一条可定位（不参与逻辑）
+    try:
+        _sample_probe_fallback_update(
+            file_name=records[0].get("file"),
+            sub_batch=records[0].get("sub_batch"),
+            idx=1,
+        )
+    except Exception:
+        pass
 
     phase = "SCAN"
     decision_used = False
@@ -2885,11 +3177,16 @@ def _run_report(csv_files, title):
     print(title)
     print("============================================================")
     # --- 核心结果（每次跑必出｜为策略官/写手看结果） ---
-    try:
-        _struct_line = STRUCT_SUMMARY_LINE + f" | HASH={STRUCT_DEF_HASH}"
-    except Exception:
-        _struct_line = STRUCT_SUMMARY_LINE
+    _struct_line, _struct_hash = _get_struct_summary_line_and_hash()
     print(_struct_line)
+    print(f"AnchorMode={STRUCT_ANCHOR_MODE}")
+    print("PreSW=LEADER_AS_TEMP | Tie=KEEP_LAST | Fallback=FIRST_VALID_WINNER | Switch=B1_RESET_TO_STEP1")
+    print("T/0=SHIFT_ONLY_NO_BREAK")
+    try:
+        _fa = BOOT_FILTER_RULE.get("forbidden_action")
+    except Exception:
+        _fa = "NA"
+    print(f"BOOT_FILTER={'ON' if BOOT_FILTER else 'OFF'} + forbidden_action={_fa}")
     _avg_pnl = (total_profit / total_entry) if total_entry else 0.0
     print(f"💶💶💶 单次平均增益: {_avg_pnl:.6f}")
     print(f"💶💶💶 总净值增益  : {total_profit:.2f}")
@@ -2901,8 +3198,13 @@ def _run_report(csv_files, title):
         _print_switches_block("HEADER")
         # 表头开关自证（锁死）：即使静默模式也必须打印
         print("结构闸门：STRUCT_SCAN=ON✅(结构扫描开启)")
-        print("靴级开关：BOOT_FILTER=ON✅(禁下注 seen_all=1..8)")
-        print(f"{STRUCT_SUMMARY_LINE} | HASH={STRUCT_DEF_HASH}")
+        print("靴级开关：BOOT_FILTER=ON✅(禁下注 seen_shift=1..8)")
+        _sl, _sh = _get_struct_summary_line_and_hash()
+        print(_sl)
+        print(f"AnchorMode={STRUCT_ANCHOR_MODE}")
+        print("PreSW=LEADER_AS_TEMP | Tie=KEEP_LAST | Fallback=FIRST_VALID_WINNER | Switch=B1_RESET_TO_STEP1")
+        print("T/0=SHIFT_ONLY_NO_BREAK")
+        print(f"BOOT_FILTER={'ON' if BOOT_FILTER else 'OFF'} + forbidden_action={BOOT_FILTER_RULE.get('forbidden_action','NA')}")
         global _STRUCT_SUMMARY_PRINTED
         _STRUCT_SUMMARY_PRINTED = True
         print(f"监测开关：{'开' if MONITOR_ENABLE else '关'}")
