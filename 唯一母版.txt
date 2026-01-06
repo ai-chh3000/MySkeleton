@@ -82,7 +82,7 @@ def _sample_probe_emit() -> None:
         return
     items = sorted(_SAMPLE_PROBE_BEST_BY_FILE.values(), key=lambda x: x[0])[:int(SAMPLE_PROBE_K or 0)]
     for _, base, sb, n in items:
-        print(f"{SAMPLE_PROBE_PREFIX}|f={base}|SB={sb}|N={n}")
+        print(f"{SAMPLE_PROBE_PREFIX}|f={base}|SB={sb}|N={n}🆗" if _SELFTEST_PASSED else f"{SAMPLE_PROBE_PREFIX}|f={base}|SB={sb}|N={n}")
 
 BUILD_TAG = "V30_UPGRADED_fix_bootid_v32_buildtag_fix|TAG20260105-01|BOOT_START_LOCK_SW|DUAL_SEEN|B1_RESET_STEP1|RUNLEN_LOCK_S|R_TRUTH|TEMP_INIT_FIRST|HYST3|DIFF_SIGN_ONLY"
 # 指标键（锁死）
