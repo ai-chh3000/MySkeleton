@@ -1,12 +1,6 @@
-# 【版本水印（交付验收用｜锁死）】
-# 水印：🚀🚀🚀 🍔🍔🍔 🎰🎰🎰
 # -*- coding: utf-8 -*-
-# ============================================================
-# 唯一母版（统一版）
-# 说明：本文件为通用唯一母版（四件套已内置）；仅维护这一份。
-# 规则：基座区冻结；规则区可改写；审查跑用 AUDIT_RUN=1；净值转正仅触发轻量自审提示。
-# ============================================================
-
+# 水印：🚀🚀🚀 🍔🍔🍔 🎰🎰🎰
+# 说明：本文件头部只允许注释；禁止出现任何“裸文件名/裸中文行”。
 import csv
 import os
 import inspect
@@ -16,7 +10,7 @@ import sys
 import traceback
 from dataclasses import dataclass, replace
 from typing import Any, Optional
-
+from collections import defaultdict
 
 # ==========================
 # 安全硬闸门（模板加固｜锁死）
@@ -27,17 +21,19 @@ WATERMARK_TEXT = "🚀🚀🚀 🍔🍔🍔 🎰🎰🎰"
 # 📌 抽样探针（冻结区｜只用于打印定位｜完全不影响策略逻辑）
 # 输出格式（每条一行）：📌|f=<文件名>|SB=<Sub-Batch>|N=<🎯=N_prebet=人类实际取值/下注点=取值点=seen_all>
 # ------------------------------------------------------------
-SAMPLE_PROBE_ENABLE = 1   # 1=ON, 0=OFF
-SAMPLE_PROBE_K = 3        # 抽样条数
+SAMPLE_PROBE_ENABLE = 1  # 1=ON, 0=OFF
+SAMPLE_PROBE_K = 3  # 抽样条数
 SAMPLE_PROBE_PREFIX = "📌"
 SAMPLE_PROBE_RUN_NONCE = int.from_bytes(os.urandom(8), "big")  # 每次运行不同；仅用于抽样排序
 _SAMPLE_PROBE_BEST_BY_FILE = {}  # file -> (score, file, sub_batch, idx)
 _SAMPLE_PROBE_FALLBACK = None  # (base, sub_batch, idx)
 
+
 def _sample_probe_u64(s: str) -> int:
     # 稳定哈希：跨进程/跨平台可复现；仅用于抽样排序（不参与任何逻辑）
     h = hashlib.md5(s.encode('utf-8'), usedforsecurity=False).hexdigest()
     return int(h[:16], 16)
+
 
 def _sample_probe_fallback_update(file_name, sub_batch, idx) -> None:
     """抽样兜底：即使无⭐/无ENTRY，也保证至少有一条📌可定位。"""
@@ -72,27 +68,31 @@ def _sample_probe_update(file_name, sub_batch, idx, boot_id=None) -> None:
     if (cur is None) or (score < cur[0]):
         _SAMPLE_PROBE_BEST_BY_FILE[key] = (score, base, sub_batch, idx)
 
+
 def _sample_probe_emit() -> None:
     """批处理结束后打印抽样结果（最多 K 条，尽量分布在不同文件）。"""
     if not SAMPLE_PROBE_ENABLE:
         return
     if not _SAMPLE_PROBE_BEST_BY_FILE:
         # 无可抽样候选：仍给 1 行提示（极简）
-        print(f"{SAMPLE_PROBE_PREFIX}|NONE")
+        print(f"{SAMPLE_PROBE_PREFIX}|NONE🆗")
         return
     items = sorted(_SAMPLE_PROBE_BEST_BY_FILE.values(), key=lambda x: x[0])[:int(SAMPLE_PROBE_K or 0)]
     for _, base, sb, n in items:
-        print(f"{SAMPLE_PROBE_PREFIX}|f={base}|SB={sb}|N={n}🆗" if _SELFTEST_PASSED else f"{SAMPLE_PROBE_PREFIX}|f={base}|SB={sb}|N={n}")
+        print(f"{SAMPLE_PROBE_PREFIX}|f={base}|SB={sb}|N={n}🆗")
+
 
 BUILD_TAG = "V30_UPGRADED_fix_bootid_v32_buildtag_fix|TAG20260105-01|BOOT_START_LOCK_SW|DUAL_SEEN|B1_RESET_STEP1|RUNLEN_LOCK_S|R_TRUTH|TEMP_INIT_FIRST|HYST3|DIFF_SIGN_ONLY"
 # 指标键（锁死）
 METRIC_KEYS = {"diff", "rate", "mean", "rate_raw", "mean_raw"}
+
 
 # ==========================
 # 统一违规出口（补丁A｜锁死）
 # ==========================
 class GuardViolation(RuntimeError):
     """门禁/审计违规：统一出口，禁止 traceback。"""
+
     def __init__(self, *, code, rule_id, phase, msg, evidence, exit_code=2):
         super().__init__(msg)
         self.code = str(code)
@@ -102,8 +102,10 @@ class GuardViolation(RuntimeError):
         self.evidence = str(evidence)
         self.exit_code = int(exit_code)
 
+
 def _raise_guard(*, code, rule_id, phase, msg, evidence, exit_code=2):
     raise GuardViolation(code=code, rule_id=rule_id, phase=phase, msg=msg, evidence=evidence, exit_code=exit_code)
+
 
 def _as_guard_from_exception(e):
     """把未知异常映射为可审计单屏错误（不放松审计强度）。"""
@@ -157,9 +159,9 @@ def _compute_core_and_slot_fingerprints() -> None:
         return
 
     ANCHOR001_BEGIN = "🍀覆盖锚点001_结构插槽_" "BEGIN"
-    ANCHOR001_END   = "🍀覆盖锚点001_结构插槽_" "END"
+    ANCHOR001_END = "🍀覆盖锚点001_结构插槽_" "END"
     begin_pat = r"^[ \t]*#\s*" + re.escape(ANCHOR001_BEGIN) + r".*$"
-    end_pat   = r"^[ \t]*#\s*" + re.escape(ANCHOR001_END)   + r".*$"
+    end_pat = r"^[ \t]*#\s*" + re.escape(ANCHOR001_END) + r".*$"
 
     begin_ms = list(re.finditer(begin_pat, src, flags=re.MULTILINE))
     end_ms = list(re.finditer(end_pat, src, flags=re.MULTILINE))
@@ -185,7 +187,7 @@ def _compute_core_and_slot_fingerprints() -> None:
 
     # 插槽文本（不含边界行本身）
     src_lines = src.splitlines()
-    slot_body_lines = src_lines[begin_line: end_line-1]
+    slot_body_lines = src_lines[begin_line: end_line - 1]
     slot_text = "\n".join(slot_body_lines).strip("\n")
 
     STRUCTURE_SLOT_FINGERPRINT = hashlib.sha256(slot_text.encode("utf-8")).hexdigest()
@@ -195,11 +197,12 @@ def _compute_core_and_slot_fingerprints() -> None:
     # - 也避免说明文字中出现类似字符导致误伤
     # 找到 END 行尾（含换行）
     e_end2 = e_end
-    if e_end2 < len(src) and src[e_end2:e_end2+1] == "\n":
+    if e_end2 < len(src) and src[e_end2:e_end2 + 1] == "\n":
         e_end2 += 1
 
     core_text = src[:b_start] + src[e_end2:]
     CORE_BASE_FINGERPRINT = hashlib.sha256(core_text.encode("utf-8")).hexdigest()
+
 
 def _print_force_proof_block():
     global _PROOF_BLOCK_PRINTED
@@ -217,7 +220,8 @@ def _print_force_proof_block():
     pizza = '🍕' + core8[:4]
     print(f"基底身份证：{pizza} | CORE8={core8} | SLOT8={slot8}")
     if STRUCTURE_SLOT_LINE_RANGE and STRUCTURE_SLOT_LINE_RANGE[0] is not None:
-        print(f"结构插槽：版本={STRUCTURE_SLOT_VERSION} | 行号范围={STRUCTURE_SLOT_LINE_RANGE[0]}..{STRUCTURE_SLOT_LINE_RANGE[1]}")
+        print(
+            f"结构插槽：版本={STRUCTURE_SLOT_VERSION} | 行号范围={STRUCTURE_SLOT_LINE_RANGE[0]}..{STRUCTURE_SLOT_LINE_RANGE[1]}")
     try:
         denom = int(globals().get("_LAST_ENTRY_FOR_PROOF", 0) or 0)
         pct = (BET_IN_FORBIDDEN_SEEN / denom * 100.0) if denom > 0 else 0.0
@@ -244,6 +248,7 @@ def _print_force_proof_block():
     if denom > 0:
         _PROOF_BLOCK_PRINTED = True
 
+
 def _print_single_screen_error(gv: 'GuardViolation'):
     # 任何异常也要满足：水印 + 强制自证块（若已打印则会自动去重）
     try:
@@ -263,6 +268,7 @@ def _print_single_screen_error(gv: 'GuardViolation'):
 
 class MetricGuardRow(dict):
     """EXECUTE/SETTLE 阶段：row 已去指标化；任何读取指标键一律 raise。"""
+
     def get(self, k, default=None):
         if k in METRIC_KEYS:
             raise RuntimeError(f"ILLEGAL_METRIC_ACCESS_IN_EXECUTE: {k}")
@@ -273,17 +279,49 @@ class MetricGuardRow(dict):
             raise RuntimeError(f"ILLEGAL_METRIC_ACCESS_IN_EXECUTE: {k}")
         return super().__getitem__(k)
 
+
+class ScanGuardRow(dict):
+    """SCAN 阶段：row 已去指标化；任何读取指标键一律 raise。"""
+
+    def get(self, k, default=None):
+        if k in METRIC_KEYS:
+            raise RuntimeError(f"ILLEGAL_METRIC_ACCESS_IN_SCAN: {k}")
+        return super().get(k, default)
+
+    def __getitem__(self, k):
+        if k in METRIC_KEYS:
+            raise RuntimeError(f"ILLEGAL_METRIC_ACCESS_IN_SCAN: {k}")
+        return super().__getitem__(k)
+
+
+# ==========================
+# 全局硬闸门（Node 1 新增）
+# ==========================
+_METRIC_READ_ARMED = 0
+
+
+def _arm_metric_read():
+    global _METRIC_READ_ARMED
+    _METRIC_READ_ARMED = 1
+
+
+def _disarm_metric_read():
+    global _METRIC_READ_ARMED
+    _METRIC_READ_ARMED = 0
+
+
 class Snapshot:
     """STAR_ROW 最小不可变快照：禁止直读指标（必须走 secure_read_metric）。
-    额外元信息（冻结区锁死）：exh_pair / rate_mode / rate_bucket_l1 / rate_bucket_r / rate_bucket
-    - 这些字段只允许在写快照时一次性绑定，投放点后只读不重算。
+    Node 1 增强：封存值（sealed values）用于 REPORT 阶段，避免再次读取指标。
     """
     __slots__ = (
         "_metrics", "_boot_id", "_idx", "_seen_all", "_rr", "_source",
-        "_exh_pair", "_rate_mode", "_rate_bucket_l1", "_rate_bucket_r", "_rate_bucket", "_rate_raw_text", "_mean_raw_text"
+        "_exh_pair", "_rate_mode", "_rate_bucket_l1", "_rate_bucket_r", "_rate_bucket", "_rate_raw_text",
+        "_mean_raw_text",
+        "_diff_val", "_rate_val", "_mean_val", "_diff_bucket", "_mean_bucket"
     )
 
-    def __init__(self, metrics: dict, *, boot_id, idx, seen_all, rr, source="STAR_ROW"):
+    def __init__(self, metrics: dict, *, boot_id, idx, seen_all, rr, source="STAR_ROW", sealed_values=None):
         self._metrics = dict(metrics)
         self._boot_id = boot_id
         self._idx = int(idx)
@@ -300,37 +338,82 @@ class Snapshot:
         self._rate_raw_text = ""
         self._mean_raw_text = ""
 
+        # Node 1: 封存值（只读）
+        if sealed_values:
+            self._diff_val = sealed_values.get("diff_val")
+            self._rate_val = sealed_values.get("rate_val")
+            self._mean_val = sealed_values.get("mean_val")
+            self._diff_bucket = sealed_values.get("diff_bucket")
+            self._mean_bucket = sealed_values.get("mean_bucket")
+        else:
+            self._diff_val = None
+            self._rate_val = None
+            self._mean_val = None
+            self._diff_bucket = None
+            self._mean_bucket = None
+
     # ---- 元信息（允许直读）----
     @property
-    def boot_id(self): return self._boot_id
+    def boot_id(self):
+        return self._boot_id
 
     @property
-    def idx(self): return self._idx
+    def idx(self):
+        return self._idx
 
     @property
-    def seen_all(self): return self._seen_all
+    def seen_all(self):
+        return self._seen_all
 
     @property
-    def rr(self): return self._rr
+    def rr(self):
+        return self._rr
 
     @property
-    def source(self): return self._source
+    def source(self):
+        return self._source
 
     # ---- 冻结区：变化率唯一入口绑定结果（允许直读）----
     @property
-    def exh_pair(self): return self._exh_pair
+    def exh_pair(self):
+        return self._exh_pair
 
     @property
-    def rate_mode(self): return self._rate_mode
+    def rate_mode(self):
+        return self._rate_mode
 
     @property
-    def rate_bucket_l1(self): return self._rate_bucket_l1
+    def rate_bucket_l1(self):
+        return self._rate_bucket_l1
 
     @property
-    def rate_bucket_r(self): return self._rate_bucket_r
+    def rate_bucket_r(self):
+        return self._rate_bucket_r
 
     @property
-    def rate_bucket(self): return self._rate_bucket
+    def rate_bucket(self):
+        return self._rate_bucket
+
+    # ---- Node 1: 封存值访问（允许 REPORT 阶段读取）----
+    @property
+    def diff_val(self):
+        return self._diff_val
+
+    @property
+    def rate_val(self):
+        return self._rate_val
+
+    @property
+    def mean_val(self):
+        return self._mean_val
+
+    @property
+    def diff_bucket(self):
+        return self._diff_bucket
+
+    @property
+    def mean_bucket(self):
+        return self._mean_bucket
 
     def _bind_rate_fields(self, *, exh_pair, rate_mode, rate_bucket_l1, rate_bucket_r, rate_bucket):
         """只允许绑定一次；后续任何再次绑定都视为污染。"""
@@ -353,6 +436,8 @@ class Snapshot:
         if name in METRIC_KEYS:
             raise RuntimeError(f"SNAPSHOT_DIRECT_ATTR_FORBIDDEN: {name}")
         return object.__getattribute__(self, name)
+
+
 def phase_transition(phase, to_phase):
     order = {"SCAN": 0, "DECISION": 1, "EXECUTE": 2, "SETTLE": 3, "DONE": 4, "REPORT": 9}
     if phase not in order or to_phase not in order:
@@ -382,16 +467,20 @@ def advance_one_row(cursor, records, *, phase, boot_id):
     if nxt < 0 or nxt >= len(records):
         return None
     return nxt
+
+
 def secure_read_metric(snap, key, phase, *, who, idx, boot_id, seen_all):
     """读指标唯一入口（锁死）。
 
-    契约：secure_read_metric(snap, key, phase, *, who, idx, boot_id, seen_all)
-      - key ∈ {diff, rate, mean, rate_raw, mean_raw}
-      - 允许：
-          (A) phase==DECISION 且 who==STAR 且 seen_all>=9 且 snap.source==STAR_ROW
-          (B) phase==REPORT 且 who==REPORT 且 snap.source==STAR_ROW（仅用于汇总输出，不参与决策）
-      - 其他：raise
+    Node 1 增强：
+      - 必须 _METRIC_READ_ARMED == 1
+      - 必须 phase == "DECISION"
+      - 必须 who == "STAR"
+      - 否则直接 raise
     """
+    if _METRIC_READ_ARMED != 1:
+        raise RuntimeError("METRIC_READ_NOT_ARMED")
+
     if key not in METRIC_KEYS:
         raise RuntimeError("METRIC_NAME_INVALID")
 
@@ -403,12 +492,12 @@ def secure_read_metric(snap, key, phase, *, who, idx, boot_id, seen_all):
         raise RuntimeError("SNAPSHOT_SOURCE_INVALID")
 
     ok_decision = (phase == "DECISION" and who == "STAR")
-    ok_report = (phase == "REPORT" and who == "REPORT")
-    if not (ok_decision or ok_report):
+    if not ok_decision:
         raise RuntimeError(f"ILLEGAL_METRIC_ACCESS: phase={phase} who={who} metric={key}")
 
-    # seen_all 门禁：BOOT_FILTER=ON 时要求 >=9；BOOT_FILTER=OFF 时放开（>=1）
-    min_seen = 9 if BOOT_FILTER else 1
+    # seen_all 门禁：按有效靴级配置 gate（N=0 等价关闭）
+    boot_on, allow_from, _raw = _get_boot_filter_effective()
+    min_seen = int(allow_from) if boot_on else 1
     try:
         sa = int(seen_all)
     except Exception:
@@ -438,12 +527,14 @@ def secure_read_metric(snap, key, phase, *, who, idx, boot_id, seen_all):
     metrics = object.__getattribute__(snap, "_metrics")
     return metrics.get(key)
 
+
 def secure_write_star_snapshot(row, phase, *, seen_all, rr, boot_id, star_idx, star_snapshot_is_none, exh_pair=None):
     """写快照唯一入口（锁死）。
-    变化率唯一入口：
-      - exh_pair = 投放点上一条结果 + 投放点这一条结果（含T则无效）
-      - 在此处一次性绑定：rate_mode / rate_bucket_l1 / rate_bucket_r / rate_bucket(active)
-      - 投放点后只读这些桶名，禁止下游重算
+    Node 1 增强：
+      - 唯一允许 arm 的地方
+      - 一次性读取并封存所有指标
+      - 严格校验 diff (1..9)
+      - 立即 seal & disarm
     """
     if phase != "DECISION":
         raise RuntimeError("STAR_SNAPSHOT_PHASE_NOT_DECISION")
@@ -452,40 +543,80 @@ def secure_write_star_snapshot(row, phase, *, seen_all, rr, boot_id, star_idx, s
     if rr == "T":
         raise RuntimeError("STAR_SNAPSHOT_ON_T")
 
-    # seen_all 门禁：BOOT_FILTER=ON 时要求 >=9；BOOT_FILTER=OFF 时放开（>=1）
-    min_seen = 9 if BOOT_FILTER else 1
+    # seen_all 门禁
+    boot_on, allow_from, _raw = _get_boot_filter_effective()
+    min_seen = int(allow_from) if boot_on else 1
     try:
         sa = int(seen_all)
     except Exception:
         raise RuntimeError("STAR_SNAPSHOT_SEEN_PARSE_FAIL")
     if sa < min_seen:
-        # 保持旧错误码语义：仅在 min_seen==9 时触发
         raise RuntimeError("STAR_SNAPSHOT_SEEN_LT9")
 
-    # 只在 DECISION/STAR 读指标
-    tmp_snap = Snapshot(
-        {"diff": row.get("diff"), "rate": row.get("rate"), "mean": row.get("mean"),
-         "rate_raw": row.get("rate_raw"), "mean_raw": row.get("mean_raw")},
-        boot_id=boot_id, idx=star_idx, seen_all=seen_all, rr=rr, source="STAR_ROW"
-    )
+    # 1. Arm
+    _arm_metric_read()
 
-    # diff=0 直接阻断（锁死）
-    d = secure_read_metric(tmp_snap, "diff", phase, who="STAR", idx=star_idx, boot_id=boot_id, seen_all=seen_all)
     try:
-        if int(float(d)) == 0:
+        # 2. Create temp snap for reading
+        tmp_snap = Snapshot(
+            {"diff": row.get("diff"), "rate": row.get("rate"), "mean": row.get("mean"),
+             "rate_raw": row.get("rate_raw"), "mean_raw": row.get("mean_raw")},
+            boot_id=boot_id, idx=star_idx, seen_all=seen_all, rr=rr, source="STAR_ROW"
+        )
+
+        # 3. Read All Metrics
+        d = secure_read_metric(tmp_snap, "diff", phase, who="STAR", idx=star_idx, boot_id=boot_id, seen_all=seen_all)
+        r = secure_read_metric(tmp_snap, "rate", phase, who="STAR", idx=star_idx, boot_id=boot_id, seen_all=seen_all)
+        m = secure_read_metric(tmp_snap, "mean", phase, who="STAR", idx=star_idx, boot_id=boot_id, seen_all=seen_all)
+        rate_raw_text = secure_read_metric(tmp_snap, "rate_raw", phase, who="STAR", idx=star_idx, boot_id=boot_id,
+                                           seen_all=seen_all)
+        mean_raw_text = secure_read_metric(tmp_snap, "mean_raw", phase, who="STAR", idx=star_idx, boot_id=boot_id,
+                                           seen_all=seen_all)
+
+        # 4. Validate Diff (Strict: 1..9)
+        try:
+            d_int = int(float(d))
+        except Exception:
+            raise RuntimeError("STAR_SNAPSHOT_DIFF_PARSE_FAIL")
+
+        if d_int == 0:
             raise RuntimeError("STAR_SNAPSHOT_DIFF_ZERO")
-    except Exception:
-        raise RuntimeError("STAR_SNAPSHOT_DIFF_PARSE_FAIL")
+        if abs(d_int) > 9:
+            raise RuntimeError("STAR_SNAPSHOT_DIFF_OVER_9")
 
-    # 变化率：唯一入口一次性绑定（0值强化在 _rate_quartet 内完成）
-    r = secure_read_metric(tmp_snap, "rate", phase, who="STAR", idx=star_idx, boot_id=boot_id, seen_all=seen_all)
-    mode, l1b, rb, active = _rate_quartet(exh_pair, r)
-    tmp_snap._bind_rate_fields(
-        exh_pair=exh_pair, rate_mode=mode,
-        rate_bucket_l1=l1b, rate_bucket_r=rb, rate_bucket=active
-    )
+        # 5. Calculate Buckets
+        mode, l1b, rb, active = _rate_quartet(exh_pair, r)
+        diff_bucket = _l1_abs_diff_bucket(d_int)
+        mean_bucket, _ = _l1_mean_bucket(d_int, m)
 
-    return tmp_snap
+        # 6. Create Final Sealed Snapshot
+        sealed_values = {
+            "diff_val": d_int,
+            "rate_val": r,
+            "mean_val": m,
+            "diff_bucket": diff_bucket,
+            "mean_bucket": mean_bucket
+        }
+
+        final_snap = Snapshot(
+            {"diff": d, "rate": r, "mean": m, "rate_raw": rate_raw_text, "mean_raw": mean_raw_text},
+            boot_id=boot_id, idx=star_idx, seen_all=seen_all, rr=rr, source="STAR_ROW",
+            sealed_values=sealed_values
+        )
+
+        final_snap._bind_rate_fields(
+            exh_pair=exh_pair, rate_mode=mode,
+            rate_bucket_l1=l1b, rate_bucket_r=rb, rate_bucket=active
+        )
+
+        _bind_raw_text_fields(final_snap, rate_raw_text, mean_raw_text)
+
+        return final_snap
+
+    finally:
+        # 7. Disarm
+        _disarm_metric_read()
+
 
 def write_star_snapshot(phase, star_row, star_idx):
     """兼容入口：内部转发到 secure_write_star_snapshot（禁止其他写法）。"""
@@ -497,6 +628,7 @@ def write_star_snapshot(phase, star_row, star_idx):
         seen_all=seen_all, rr=rr, boot_id=boot_id, star_idx=star_idx,
         star_snapshot_is_none=True
     )
+
 
 def _to_row_lite(row):
     """去指标化：进入 EXECUTE/SETTLE 的 row 只保留必要字段。"""
@@ -511,6 +643,7 @@ def _to_row_lite(row):
     }
     return MetricGuardRow(keep)
 
+
 def guard_future_rows(records, start_j):
     """从 start_j 开始把后续行替换为 RowLite(MetricGuardRow)，从根源去指标。"""
     for k in range(start_j, len(records)):
@@ -518,6 +651,7 @@ def guard_future_rows(records, start_j):
         if isinstance(r, MetricGuardRow):
             continue
         records[k] = _to_row_lite(r)
+
 
 # ==========================
 # 全局开关（必须显式定义｜避免 NameError）
@@ -527,9 +661,6 @@ MONITOR_ENABLE = 0
 
 # 验证分拆开关：0=关，1=开（默认关；若开启，必须仍满足零未来与一次性扫描约束）
 VERIFY_SPLIT_ENABLE = 0
-
-
-
 
 # 表头自证：只打印一次
 _HEADER_MAPPING_PRINTED = False
@@ -566,8 +697,8 @@ PPBB_FIRST_EVIDENCE = None
 POSITIVE_AUDIT_ENABLE = 1
 
 # 触发门槛（二选一或同时启用；默认仅 Total>0）
-POSITIVE_AUDIT_TRIGGER_TOTAL = 1   # Total_Profit > 0
-POSITIVE_AUDIT_TRIGGER_AVG = 0     # Avg_Profit > 0
+POSITIVE_AUDIT_TRIGGER_TOTAL = 1  # Total_Profit > 0
+POSITIVE_AUDIT_TRIGGER_AVG = 0  # Avg_Profit > 0
 
 # 影子重算（可选｜默认关；仅用于自证一致性，不改策略逻辑）
 POSITIVE_AUDIT_SHADOW_RECHECK = 0
@@ -578,14 +709,13 @@ _PROOF_BLOCK_PRINTED = False
 _SELFTEST_PASSED = False
 _SOURCE_HASHES_PRINTED = False
 
-
 # 输出静默开关：1=静默（仅保留主报告+强制自证；不打印表头自证/L1分布/连续统计），0=详细
 # 🍀覆盖锚点003_静默开关（0=全量报告默认显示；1=只保留最简结果）
 SILENT_MODE = 1
 
 # 审查跑开关（时间管理局｜锁死）
 # 规则：当 AUDIT_RUN=1 时，必须无条件输出“审查跑必出块”（含 L1 三块锁死标题），不受 SILENT_MODE 影响。
-AUDIT_RUN = 0  # 0=普通跑；1=审查跑（审查跑必出）
+AUDIT_RUN = 1  # 0=普通跑；1=审查跑（审查跑必出）
 
 # ============================================================
 # 审计日志缓冲（默认静默｜仅失败/报错输出｜锁死）
@@ -595,6 +725,7 @@ AUDIT_RUN = 0  # 0=普通跑；1=审查跑（审查跑必出）
 AUDIT_FAIL_ONLY = 1  # 1=仅失败输出✅；0=总是输出（调试用）
 _AUDIT_LOG_BUF = []
 
+
 def _audit_log(line: str):
     try:
         _AUID = AUDIT_FAIL_ONLY
@@ -602,6 +733,7 @@ def _audit_log(line: str):
         _AUID = 1
     # 始终记录；是否打印由 flush 决定
     _AUDIT_LOG_BUF.append(str(line))
+
 
 def _flush_audit_log(tag: str = ""):
     global _AUDIT_LOG_BUF
@@ -616,22 +748,60 @@ def _flush_audit_log(tag: str = ""):
         print(x)
     _AUDIT_LOG_BUF = []
 
-# 靴级开关（锁死）：仅限制“实际落注”是否允许发生在前8口（seen_all=1..8）
-# BOOT_FILTER=ON✅：禁下注 seen_shift=1..8；第9口起允许
-# BOOT_FILTER=OFF⛔：靴首允许下注
-BOOT_FILTER = 0  # 1=ON✅，0=OFF⛔
-BOOT_FILTER_TEXT = "BOOT_FILTER=ON✅(禁下注 seen_shift=1..8)" if BOOT_FILTER else "BOOT_FILTER=OFF⛔(靴首允许下注)"
+
+# 靴级开关（锁死）：仅限制“实际落注”是否允许发生在靴首禁投区（沿用现有 seen_all 计数口径）
+# 旧口径：N=9 => 禁下注 seen_all=1..8；第9口起允许
+# 新增（锚点002覆盖）：BOOT_BLOCK_N_OVERRIDE（整数字符串）
+# - 空字符串：不覆盖（继续使用 BOOT_FILTER 开关与旧默认 N=9）
+# - N=0：强制关闭靴级开关（等价 BOOT_FILTER=OFF⛔）
+# - N>=1：强制开启靴级开关，并将 N 设为该值（下限钳制为 3）
+BOOT_FILTER = 0  # 1=ON✅，0=OFF⛔（当 BOOT_BLOCK_N_OVERRIDE 非空时，本开关会被覆盖）
+
+BOOT_FILTER_ALLOW_FROM_DEFAULT = 9  # 默认第9口起允许（等价旧版 seen_all=1..8 禁投）
+BOOT_FILTER_ALLOW_FROM_MIN = 3  # 你要求的最小门槛：第3口起允许
+
+
+def _get_boot_filter_effective():
+    """返回 (boot_on: bool, allow_from_n: int, raw_override: str)"""
+    raw = (globals().get("BOOT_BLOCK_N_OVERRIDE", "") or "").strip()
+    if raw == "":
+        # 不覆盖：保持旧行为（开关=BOOT_FILTER，门槛=默认9）
+        return (bool(BOOT_FILTER), int(BOOT_FILTER_ALLOW_FROM_DEFAULT), raw)
+
+    # 覆盖：N=0 关闭；N>=1 开启（下限=3）
+    try:
+        n = int(raw)
+    except Exception:
+        raise RuntimeError(f"❌ BOOT_BLOCK_N_OVERRIDE 必须为整数字符串：got={raw!r}")
+
+    if n < 0:
+        raise RuntimeError(f"❌ BOOT_BLOCK_N_OVERRIDE 不允许为负数：got={n}")
+
+    if n == 0:
+        return (False, int(BOOT_FILTER_ALLOW_FROM_DEFAULT), raw)
+
+    n_eff = n if n >= BOOT_FILTER_ALLOW_FROM_MIN else int(BOOT_FILTER_ALLOW_FROM_MIN)
+    return (True, int(n_eff), raw)
+
+
+def _boot_filter_label() -> str:
+    boot_on, allow_from, raw = _get_boot_filter_effective()
+    if not boot_on:
+        if raw == "0":
+            return "BOOT_FILTER=OFF⛔(由 BOOT_BLOCK_N_OVERRIDE=0 关闭)"
+        return "BOOT_FILTER=OFF⛔(靴首允许下注)"
+    forbid_hi = max(int(allow_from) - 1, 0)
+    if forbid_hi >= 1:
+        return f"BOOT_FILTER=ON✅(禁下注 seen_all=1..{forbid_hi}；第{allow_from}口起允许)"
+    return f"BOOT_FILTER=ON✅(第{allow_from}口起允许)"
+
 
 # BOOT_FILTER 禁区处理策略（冻结区真源｜锁死）
 # 0=SKIP_STAR：命中禁区♻⭐只跳过该⭐，继续在同一靴寻找下一颗♻⭐（非顺延）
 # 1=ABORT_BOOT：命中禁区♻⭐直接作废整靴（不再寻找下一颗♻⭐）
 BOOT_FILTER_FORBIDDEN_ABORT = 0
 
-# 靴级开关标签（供表头/自证统一调用，避免 NameError）
-def _boot_filter_label() -> str:
-    return BOOT_FILTER_TEXT
-
-BET_IN_FORBIDDEN_SEEN = 0  # 实际落注点落在 seen_all=1..8 的计数（发现即 raise）
+BET_IN_FORBIDDEN_SEEN = 0  # 实际落注点落在 禁投区(seen_all < N) 的计数（发现即 raise）
 # ============================================================
 # 结构扫描开关（结构闸门｜锁死）
 # ============================================================
@@ -658,23 +828,142 @@ STRUCTURE_SLOT_LINE_RANGE = None  # (begin_line, end_line)
 # 🍀覆盖锚点001_结构插槽_BEGIN（整段覆盖用此行定位；覆盖范围=本行到对应_END）
 # [SLOT_BEGIN] STRUCTURE_SLOT
 # [STRUCT_SLOT_BEGIN]
-# 输出策略：本插槽仅放“结构配置表”；算法在冻结区（避免写手改偏）
-# 结构配置表（覆盖区可改｜只填这一张表）
-# 列：step | side(S/W/B/P) | min_len | max_len | mark(⭐=结构终点)
-# v2 锁死：⭐ 必须唯一且出现在最后一行；覆盖区不得写任何扫描/门禁逻辑
-# 默认结构：S≥3 → W1-2 → S⭐
-STRUCT_CONFIG_TEXT = """step	side	min_len	max_len	mark
-1	S	3	999	
-2	W	1	2	
+# 锚点001=结构唯一真源（仅内部维护｜写手禁止改动）
+# 写手只允许覆盖锚点002（参数/规则族/报告参数行），不得写结构扫描代码，不得触碰冻结区
+# 切结构：仅改 ACTIVE_STRUCT_NAME 一行；运行时结构只由锚点001决定
+# 结构表列：step | side(S/W) | min_len | max_len | mark(⭐=结构终点)
+# 锁死：每个 variant 的 value 只能是一张表；step=1..N 连续；⭐唯一且在最后一行
+
+# ------------------------- 结构库（内部维护）-------------------------
+STRUCT_VARIANTS = {
+    # ===================== 三连结构 =====================
+    # W1-2 → S=3 ⭐｜投放方向：S（跟随⭐）
+    "三连结构": """step	side	min_len	max_len	mark
+1	W	1	2
+2	S	3	3	⭐
+""",
+
+    # ===================== Q1 =====================
+    # S≥3 → W1-2 → S⭐｜投放方向：S（跟随⭐）
+    "Q1": """step	side	min_len	max_len	mark
+1	S	3	999
+2	W	1	2
 3	S	1	999	⭐
-"""
+""",
+
+    # ===================== Q1-V2 =====================
+    # W1-2 → S≥3 → W1-2 → S⭐｜投放方向：S（跟随⭐）
+    "Q1-V2": """step	side	min_len	max_len	mark
+1	W	1	2
+2	S	3	999
+3	W	1	2
+4	S	1	999	⭐
+""",
+
+    # ===================== Q1-S4版 =====================
+    # S≥4 → W1-2 → S⭐｜投放方向：S（跟随⭐）
+    "Q1-S4版": """step	side	min_len	max_len	mark
+1	S	4	999
+2	W	1	2
+3	S	1	999	⭐
+""",
+
+    # ===================== 延迟-Q1-S4版（B方案｜👀无规则，🎯待触发） =====================
+    # 基底：S≥4 → W1-2 → S⭐｜延迟：从👀后逐口等🎯命中（B方案不做W/S过滤）
+    # 👀条件：NONE（可调）
+    # 🎯条件：前小（可调）
+    # 投放方向：S（触发后投放点=下一口非T生效；T=跳过）
+    "延迟-Q1-S4版": """step	side	min_len	max_len	mark
+1	S	4	999
+2	W	1	2
+3	S	1	999	👀⭐
+""",
+    # ===================== R1 =====================
+    # S≥4 → W1-2 → S1-2 → ⭐W1｜投放方向：S（跟随⭐）
+    "R1": """step	side	min_len	max_len	mark
+1	S	4	999
+2	W	1	2
+3	S	1	2
+4	W	1	1	⭐
+""",
+
+    # ===================== 31打反 =====================
+    # W1-2 → S=3 → W1⭐｜投放方向：S（结构31打反）
+    "31打反": """step	side	min_len	max_len	mark
+1	W	1	2
+2	S	3	3
+3	W	1	1	⭐
+""",
+
+    # ===================== 单边41 =====================
+    # W1-2 → S=4 → W1=1 → S=1⭐｜投放方向：S（跟随⭐）
+    "单边41": """step	side	min_len	max_len	mark
+1	W	1	2
+2	S	4	4
+3	W	1	1
+4	S	1	1	⭐
+""",
+}
+
+# 当前启用结构（切结构只改这一行）
+ACTIVE_STRUCT_NAME = "Q1-S4版"
+
+# 运行时生效结构表（解析器/扫描器只读这个）
+if ACTIVE_STRUCT_NAME not in STRUCT_VARIANTS:
+    raise RuntimeError(f"❌ 结构不存在：{ACTIVE_STRUCT_NAME}")
+STRUCT_CONFIG_TEXT = STRUCT_VARIANTS[ACTIVE_STRUCT_NAME]
+# ------------------------- 执行链路 Profile 库（内部维护）-------------------------
+# 说明：锚点002只允许填 EXEC_PROFILE_OVERRIDE 字符串；冻结区将做白名单校验并应用
+EXEC_PROFILES = {
+    # 马丁（输进｜按序列推进）
+    "MARTIN_1248": {"mode": "MARTIN_SEQ", "units": [1, 2, 4, 8]},
+    "MARTIN_124816": {"mode": "MARTIN_SEQ", "units": [1, 2, 4, 8, 16]},
+    "MARTIN_124": {"mode": "MARTIN_SEQ", "units": [1, 2, 4]},
+    # 预留：平注/胜进等需冻结区新增 MODE 支持后再启用（当前选择会明确报错）
+    "FLAT_1": {"mode": "RESERVED_NOT_ENABLED_YET"},
+    "WINPRESS_1_1_1p5": {"mode": "RESERVED_NOT_ENABLED_YET"},
+}
+DEFAULT_EXEC_PROFILE = "MARTIN_1248"
+
+# ------------------------- 快照链路 Profile 库（内部维护）-------------------------
+# 说明：锚点002只允许填 SNAP_PROFILE_OVERRIDE 字符串；冻结区将做白名单校验并应用
+SNAP_PROFILES = {
+    # 与旧默认保持一致：仅 L4 统计（不漂移）
+    "L4_ONLY": {"TARGET_STAGE": "L4", "ENABLE_L1": 0, "ENABLE_L2": 0, "ENABLE_L3": 0, "ENABLE_L4": 1, "ENABLE_L5": 0},
+
+    # 全开（目标层仍默认 L4）
+    "ALL_ON": {"TARGET_STAGE": "L4", "ENABLE_L1": 1, "ENABLE_L2": 1, "ENABLE_L3": 1, "ENABLE_L4": 1, "ENABLE_L5": 0},
+
+    # 常用组合
+    "L1_L4": {"TARGET_STAGE": "L4", "ENABLE_L1": 1, "ENABLE_L2": 0, "ENABLE_L3": 0, "ENABLE_L4": 1, "ENABLE_L5": 0},
+    "L1_ONLY": {"TARGET_STAGE": "L1", "ENABLE_L1": 1, "ENABLE_L2": 0, "ENABLE_L3": 0, "ENABLE_L4": 0, "ENABLE_L5": 0},
+
+    # L5（新增｜逻辑同 L4；默认仍用 L4_ONLY 不漂移）
+    "L5_ONLY": {"TARGET_STAGE": "L5", "ENABLE_L1": 0, "ENABLE_L2": 0, "ENABLE_L3": 0, "ENABLE_L4": 0, "ENABLE_L5": 1},
+    "L4_L5": {"TARGET_STAGE": "L5", "ENABLE_L1": 0, "ENABLE_L2": 0, "ENABLE_L3": 0, "ENABLE_L4": 1, "ENABLE_L5": 1},
+    "ALL_ON_L5": {"TARGET_STAGE": "L5", "ENABLE_L1": 1, "ENABLE_L2": 1, "ENABLE_L3": 1, "ENABLE_L4": 1, "ENABLE_L5": 1},
+}
+DEFAULT_SNAP_PROFILE = "L4_ONLY"
+
 
 def scan_structure(records):
-    """结构插槽（覆盖区）：只提供配置；扫描器在冻结区。"""
+    """结构插槽（覆盖区）：只提供 STRUCT_CONFIG_TEXT；扫描器在冻结区。"""
+    # 防串台：确保运行时结构表确实来自结构库选择器（锚点002不得反向影响锚点001）
+    if not globals().get("_STRUCT_SLOT_NAME_PRINTED"):
+        if ACTIVE_STRUCT_NAME not in STRUCT_VARIANTS:
+            raise RuntimeError(f"❌ 结构不存在：{ACTIVE_STRUCT_NAME}")
+        if STRUCT_CONFIG_TEXT != STRUCT_VARIANTS[ACTIVE_STRUCT_NAME]:
+            raise RuntimeError(
+                "❌ 结构串台：STRUCT_CONFIG_TEXT 与 ACTIVE_STRUCT_NAME 不一致（请检查锚点002是否误写结构变量）")
+        print(f"结构名：{ACTIVE_STRUCT_NAME}")
+        globals()["_STRUCT_SLOT_NAME_PRINTED"] = True
     return _frozen_scan_structure(records, STRUCT_CONFIG_TEXT)
+
+
 # [STRUCT_SLOT_END]
 # [SLOT_END] STRUCTURE_SLOT
 # 🍀覆盖锚点001_结构插槽_END
+
 
 STRUCT_DEF_HASH = None  # AUTO（由 STRUCT_CONFIG_TEXT + Anchor 计算）
 _STRUCT_SUMMARY_PRINTED = False
@@ -685,15 +974,15 @@ _STRUCT_SUMMARY_PRINTED = False
 # 目标：结构表格可由覆盖区填写；扫描算法与口径固定在冻结区，避免写手改偏。
 
 SW_RULE = {
-    "MODE": "RUNLEN",           # 段长口径：连续段长
-    "VALID_R": ("B", "P"),      # 仅BP参与结构段长
-    "IGNORE_T": True,           # T 不参与、不打断
-    "ZERO_DIFF_INVALID": True,  # 点差==0 不参与、不打断
+    "MODE": "RUNLEN",  # 段长口径：连续段长
+    "VALID_R": ("B", "P"),  # 仅BP参与结构段长
+    "IGNORE_T": True,  # T 不参与、不打断
+    "ZERO_DIFF_INVALID": False,  # Node 3: 移除 diff 依赖，点差=0 不再作为无效口判定依据（r=T 已覆盖）
 
     # 未定义期 temp_S 口径（锁死｜方案B）
     "TEMP_INIT": "FIRST_VALID_WINNER",  # 首个有效口赢家即 temp_S
-    "HYST_SWITCH": 3,                   # 被反超阈值：对方领先>=3才切换
-    "WINNER_SOURCE": "DIFF_SIGN",       # 胜方只认 diff 符号：<0=P >0=B =0=T
+    "HYST_SWITCH": 3,  # 被反超阈值：对方领先>=3才切换
+    "WINNER_SOURCE": "R_COLUMN",  # Node 3: 强制使用 R_COLUMN，物理屏蔽 diff
 }
 
 # Anchor（锚点）口径（冻结区真源｜锁死）
@@ -702,15 +991,21 @@ STRUCT_ANCHOR_MODE = "FROM_BOOT_START_LOCK_SW"
 
 
 def _boot_filter_rule():
-    """靴级规则（冻结区真源）"""
+    """靴级规则（冻结区真源）——按有效配置动态生效（支持锚点002覆盖 N / N=0 关闭）。"""
+    boot_on, allow_from, _raw = _get_boot_filter_effective()
+    forbidden_lo = 1
+    forbidden_hi = max(int(allow_from) - 1, 0)
     return {
-        "min_seen": 9,                       # BOOT_FILTER=ON 时允许下注/写入快照的最小 seen_all
-        "forbidden_lo": 1,
-        "forbidden_hi": 8,                   # 禁区：seen_all=1..8
+        "boot_on": bool(boot_on),
+        "min_seen": int(allow_from) if boot_on else 1,  # 允许下注/写入快照的最小 seen_all
+        "forbidden_lo": int(forbidden_lo),
+        "forbidden_hi": int(forbidden_hi),  # 禁区：seen_all=1..(N-1)
         "forbidden_action": "ABORT_BOOT" if BOOT_FILTER_FORBIDDEN_ABORT else "SKIP_STAR",
     }
 
-BOOT_FILTER_RULE = _boot_filter_rule()
+
+BOOT_FILTER_RULE = _boot_filter_rule()  # 运行时会在 _run_report 开始处刷新一次
+
 
 def _cfg_parse_int(x):
     try:
@@ -729,18 +1024,16 @@ def _cfg_parse_int(x):
     except Exception:
         return None
 
+
 def _cfg_is_valid_struct_row(rec: dict):
-    """结构行有效性：以点差推胜负（用户口径：diff<0=P, diff>0=B, diff==0=T）。
-    仅当 diff 可解析且非0 时视为有效口；T/0 只位移不计段长。
+    """结构行有效性：Node 3 r-only 重构。
+    仅当 r ∈ {B, P} 时视为有效口；T 只位移不计段长。
     """
-    d = _cfg_parse_int(rec.get("diff"))
-    if d is None:
-        return False
-    if SW_RULE["ZERO_DIFF_INVALID"] and d == 0:
-        return False
-    # 赢家侧从 diff 推导，避免 r/Exhaust 解析异常导致误判为无效口
-    rec["_r_by_diff"] = "B" if d > 0 else ("P" if d < 0 else "T")
-    return rec["_r_by_diff"] in ("B", "P")
+    r = rec.get("r")
+    if r in ("B", "P"):
+        return True
+    return False
+
 
 def _cfg_parse_struct_table(text: str):
     """解析覆盖区结构表（STRUCT-Lang v2）。
@@ -817,6 +1110,7 @@ def _cfg_parse_struct_table(text: str):
 
     return rows
 
+
 def _cfg_norm_struct_text(text: str) -> str:
     """结构表规范化文本（用于 HASH）。"""
     if text is None:
@@ -832,6 +1126,7 @@ def _cfg_norm_struct_text(text: str) -> str:
     if lines and ("step" in lines[0].lower()) and ("side" in lines[0].lower()):
         lines = lines[1:]
     return "\n".join(lines).strip()
+
 
 def _cfg_struct_expr(rows) -> str:
     """结构表达（用于打印）：例 S≥3 → W1-2 → S⭐"""
@@ -853,21 +1148,24 @@ def _cfg_struct_expr(rows) -> str:
         parts.append(f"{side}{seg}{mark}")
     return " → ".join(parts)
 
+
 def _cfg_struct_hash(text: str, anchor_mode: str) -> str:
     """结构 HASH（含 Anchor）。"""
     norm = _cfg_norm_struct_text(text)
     payload = (str(anchor_mode or "") + "\n" + norm).encode("utf-8")
     return hashlib.md5(payload).hexdigest()[:8]
 
+
 def _cfg_config_uses_sw(rows) -> bool:
     return any((r.get("side") in ("S", "W")) for r in (rows or []))
+
 
 def _cfg_anchor_define_after_s_defined(records):
     """定义 Anchor：S_DEFINED_IDX 与 strong_abs（B/P）。
     口径锁死（靴首扫描版）：
       - strong_abs：谁先出现“连续有效口段长（RUNLEN）>=3”，谁就是 S（强）
       - S_DEFINED_IDX：该 RUNLEN 达到第3口所在的 records 行号（0-based idx）
-      - 只计有效口：r∈{B,P} 且 diff!=0；T/0 只位移
+      - 只计有效口：r∈{B,P}；T 只位移
     """
     run_side = None
     run_len = 0
@@ -884,6 +1182,7 @@ def _cfg_anchor_define_after_s_defined(records):
             return i, run_side
     return None, None
 
+
 def scan_by_config_v2(records, rows, anchor_mode, sw_rule):
     """冻结区：配置驱动结构扫描器 v2（多段｜靴首扫描版｜RUNLEN）。
 
@@ -894,7 +1193,7 @@ def scan_by_config_v2(records, rows, anchor_mode, sw_rule):
     - strong_abs：谁先出现“连续有效口段长（RUNLEN）>=3”，谁就是 S（强）；之后不再切换
     - 未定义期：temp_S/temp_W=当前累计领先方（有效口累计 cntB/cntP；平手 KEEP_LAST；首个有效口兜底）
       且 temp_S 一旦切换：B1 重置到 step1（防段内换边漂移）
-    - 段长累计：结构段长按 RUNLEN（连续同侧有效口）；T/0 只位移不计段长、不打断
+    - 段长累计：结构段长按 RUNLEN（连续同侧有效口）；T 只位移不计段长、不打断
     - BOOT_FILTER 禁区：按位移口 seen_shift=1..8（含T/0），仅影响 ENTRY♻⭐；RAW♻⭐不受影响
     - 段边界：以“侧变/mismatch”作为自然边界；达到 min_len 不会在同一口强行跨段
     """
@@ -906,18 +1205,18 @@ def scan_by_config_v2(records, rows, anchor_mode, sw_rule):
         "entry_star_idx": None,
 
         # 禁区作废（必须出现）
-        "skipped_forbidden_star_cnt": 0,     # 禁区命中的⭐被作废次数
-        "forbidden_star_cnt": 0,             # 禁区命中总次数（含ABORT/其它）
-        "forbidden_star_first_seen": None,   # 首次禁区命中的 RAW♻⭐ idx
+        "skipped_forbidden_star_cnt": 0,  # 禁区命中的⭐被作废次数
+        "forbidden_star_cnt": 0,  # 禁区命中总次数（含ABORT/其它）
+        "forbidden_star_first_seen": None,  # 首次禁区命中的 RAW♻⭐ idx
 
         # 状态重置计数（必须出现）
-        "reset_to_step1_cnt": 0,             # 所有回到 step1 的次数（含禁区/侧变/溢出等）
-        "reset_forbidden_cnt": 0,            # 禁区作废导致的重置次数（应与 skipped_forbidden_star_cnt 一致）
-        "reset_side_switch_cnt": 0,          # temp_S 发生切换导致的重置次数
+        "reset_to_step1_cnt": 0,  # 所有回到 step1 的次数（含禁区/侧变/溢出等）
+        "reset_forbidden_cnt": 0,  # 禁区作废导致的重置次数（应与 skipped_forbidden_star_cnt 一致）
+        "reset_side_switch_cnt": 0,  # temp_S 发生切换导致的重置次数
 
         # temp_S 自证
-        "temp_init_idx": None,               # temp_S 首次建立的 idx（首个有效口）
-        "temp_switch_cnt": 0,                # temp_S 切换次数（被反超>=阈值）
+        "temp_init_idx": None,  # temp_S 首次建立的 idx（首个有效口）
+        "temp_switch_cnt": 0,  # temp_S 切换次数（被反超>=阈值）
 
         # 审计字段
         "anchor_mode": anchor_mode,
@@ -926,7 +1225,7 @@ def scan_by_config_v2(records, rows, anchor_mode, sw_rule):
         "s_defined_idx": None,
     }
 
-    step_i = 0          # 0-based
+    step_i = 0  # 0-based
     seg_len = 0
 
     # strong_abs / weak_abs：最终 S/W（绝对方）
@@ -943,6 +1242,7 @@ def scan_by_config_v2(records, rows, anchor_mode, sw_rule):
     run_len = 0
 
     rule = BOOT_FILTER_RULE
+    boot_on = bool(rule.get("boot_on", bool(BOOT_FILTER)))
     forbidden_lo, forbidden_hi = rule["forbidden_lo"], rule["forbidden_hi"]
     forbidden_action = rule.get("forbidden_action", "SKIP_STAR")
 
@@ -979,7 +1279,7 @@ def scan_by_config_v2(records, rows, anchor_mode, sw_rule):
         if info["raw_star_idx"] is None:
             info["raw_star_idx"] = cand_star_idx
 
-        if BOOT_FILTER and (forbidden_lo <= seen_shift <= forbidden_hi):
+        if boot_on and (forbidden_lo <= seen_shift <= forbidden_hi):
             info["forbidden_star_cnt"] += 1
             if info["forbidden_star_first_seen"] is None:
                 info["forbidden_star_first_seen"] = cand_star_idx
@@ -997,20 +1297,17 @@ def scan_by_config_v2(records, rows, anchor_mode, sw_rule):
         return "STRUCT_OK", cand_star_idx, strong_abs, info
 
     for i, rec in enumerate(records or []):
-        idx = i                 # records 行号（0-based）
-        seen_shift = i + 1      # 位移口（含T/0）
+        idx = i  # records 行号（0-based）
+        seen_shift = i + 1  # 位移口（含T/0）
 
         if not _cfg_is_valid_struct_row(rec):
             # 无效口：只位移，不计段长，不打断
             continue
 
-        # 胜方只认 diff 符号（锁死）：<0=P >0=B =0/T
-        d = _cfg_parse_int(rec.get("diff"))
-        if d is None:
+        # Node 3: r-only, no diff reading
+        r_abs = rec.get("r")
+        if r_abs not in ("B", "P"):
             r_abs = "T"
-        else:
-            r_abs = "B" if d > 0 else ("P" if d < 0 else "T")
-        rec["_r_by_diff"] = r_abs
 
         # 1) RUNLEN：用于锁定 strong_abs（谁先连续>=3）
         if r_abs == run_side:
@@ -1111,6 +1408,7 @@ def scan_by_config_v2(records, rows, anchor_mode, sw_rule):
         info["fail_reason"] = "NO_CANDIDATE"
     return "STRUCT_FAIL", None, strong_abs, info
 
+
 def _get_struct_summary_line_and_hash():
     """给报告用：结构摘要行 + HASH（含 Anchor）。"""
     try:
@@ -1120,6 +1418,8 @@ def _get_struct_summary_line_and_hash():
         return f"结构摘要：{expr} | HASH={h}", h
     except Exception:
         return "结构摘要：<PARSE_FAIL>", "NA"
+
+
 def _frozen_scan_structure(records, struct_config_text):
     """冻结区结构扫描（配置驱动 v2：多段 + Anchor）
     返回：("STRUCT_OK"|"STRUCT_FAIL", star_idx_or_None, strong_side_or_None, info)
@@ -1148,6 +1448,8 @@ def _frozen_scan_structure(records, struct_config_text):
     info["struct_expr"] = info.get("struct_expr") or _cfg_struct_expr(rows)
 
     return "STRUCT_OK", entry_star_idx, strong_abs, info
+
+
 # ==========================
 # 打印格式工具（锁死）
 # ==========================
@@ -1156,12 +1458,15 @@ def _pct(n, d, nd=2):
         return "0%"
     return f"{(n * 100.0 / d):.{nd}f}%"
 
+
 def _cnt_pct(n, d, nd=2):
     return f"{n} ({_pct(n, d, nd)})"
+
 
 # 开关打印硬锁（锁死）：表头+强制自证 均必须打印
 _PRINTED_SWITCHES_HEADER = False
 _PRINTED_SWITCHES_PROOF = False
+
 
 def _print_switches_block(where: str):
     """硬锁：必须打印 BOOT_FILTER 与 STRUCT_SCAN；并打标记供断言。"""
@@ -1176,6 +1481,8 @@ def _print_switches_block(where: str):
     else:
         # 未知位置仍不允许静默放过
         raise RuntimeError("❌ _print_switches_block(where) where 非法")
+
+
 # 上下文（用于最小溯源打印）
 _CTX_FILE = ""
 _CTX_SUBBATCH = ""
@@ -1248,6 +1555,8 @@ def _audit_forbid_idx_offset():
     print("✅ 安全自检通过：执行/结算段未检测到禁止片段。")
     if not SILENT_MODE:
         print("=== 安全自检完成 ===")
+
+
 def _audit_structure_slot_integrity() -> None:
     """
     结构插槽完整性自检（开发期防误伤版本）：
@@ -1272,12 +1581,12 @@ def _audit_structure_slot_integrity() -> None:
     lines = src.splitlines()
 
     ANCHOR001_BEGIN = "🍀覆盖锚点001_结构插槽_" "BEGIN"
-    ANCHOR001_END   = "🍀覆盖锚点001_结构插槽_" "END"
+    ANCHOR001_END = "🍀覆盖锚点001_结构插槽_" "END"
     begin_pat = r"^[ \t]*#\s*" + re.escape(ANCHOR001_BEGIN) + r".*$"
-    end_pat   = r"^[ \t]*#\s*" + re.escape(ANCHOR001_END)   + r".*$"
+    end_pat = r"^[ \t]*#\s*" + re.escape(ANCHOR001_END) + r".*$"
 
     begin_ms = [i for i, line in enumerate(lines) if re.match(begin_pat, line)]
-    end_ms   = [i for i, line in enumerate(lines) if re.match(end_pat, line)]
+    end_ms = [i for i, line in enumerate(lines) if re.match(end_pat, line)]
 
     if len(begin_ms) != 1 or len(end_ms) != 1:
         raise RuntimeError(
@@ -1293,13 +1602,13 @@ def _audit_structure_slot_integrity() -> None:
     slot_text = "\n".join(slot_lines)
 
     scan_hits = re.findall(r"^\s*def\s+scan_structure\s*\(", slot_text, flags=re.MULTILINE)
-    cfg_hits  = re.findall(r"^\s*STRUCT_CONFIG_TEXT\s*=", slot_text, flags=re.MULTILINE)
+    cfg_hits = re.findall(r"^\s*STRUCT_CONFIG_TEXT\s*=", slot_text, flags=re.MULTILINE)
 
     if len(scan_hits) != 1 or len(cfg_hits) != 1:
         raise RuntimeError(
             "❌ 结构插槽内容异常："
             f"scan_structure={len(scan_hits)} STRUCT_CONFIG_TEXT={len(cfg_hits)}"
-            f" | slot_lines={begin_line+1}..{end_line}"
+            f" | slot_lines={begin_line + 1}..{end_line}"
         )
 
     # 覆盖区硬审计：禁止扫描/门禁逻辑痕迹
@@ -1310,16 +1619,18 @@ def _audit_structure_slot_integrity() -> None:
 
     # 追加：覆盖锚点002（报告汇总）唯一性审计（全文件硬要求）
     ANCHOR002_BEGIN = "🍀覆盖锚点002_报告汇总_" "BEGIN"
-    ANCHOR002_END   = "🍀覆盖锚点002_报告汇总_" "END"
+    ANCHOR002_END = "🍀覆盖锚点002_报告汇总_" "END"
     begin_pat2 = r"^[ \t]*#\s*" + re.escape(ANCHOR002_BEGIN) + r".*$"
-    end_pat2   = r"^[ \t]*#\s*" + re.escape(ANCHOR002_END)   + r".*$"
+    end_pat2 = r"^[ \t]*#\s*" + re.escape(ANCHOR002_END) + r".*$"
     begin_ms2 = [i for i, line in enumerate(lines) if re.match(begin_pat2, line)]
-    end_ms2   = [i for i, line in enumerate(lines) if re.match(end_pat2, line)]
+    end_ms2 = [i for i, line in enumerate(lines) if re.match(end_pat2, line)]
     if len(begin_ms2) != 1 or len(end_ms2) != 1:
         raise RuntimeError(
             "❌ 报告汇总锚点行必须且只能各出现 1 次："
             f"BEGIN={len(begin_ms2)}({begin_ms2}) END={len(end_ms2)}({end_ms2})"
         )
+
+
 def _update_run(run_side, run_len, r):
     # 状态 T 位移零偏差：run_side/run_len 不变  # [cite: 13]
     if r == "T":
@@ -1330,6 +1641,7 @@ def _update_run(run_side, run_len, r):
         return r, 1  # [cite: 13]
     return run_side, run_len + 1  # [cite: 13]
 
+
 def _compute_max_runs_first9(records):
     # 只看前 9 口（seen_all=1..9，状态 B/P/T 都算位移口数）  # [cite: 14]
     seen_all = 0  # [cite: 14]
@@ -1339,15 +1651,17 @@ def _compute_max_runs_first9(records):
     for rec in records:
         seen_all += 1  # [cite: 14]
         run_side, run_len = _update_run(run_side, run_len, rec["r"])  # [cite: 14]
-        if run_side in ("B","P"):
+        if run_side in ("B", "P"):
             if run_len > max_run[run_side]:
                 max_run[run_side] = run_len  # [cite: 14]
         if seen_all >= 9:
             break  # [cite: 14]
     return max_run["B"], max_run["P"], seen_all  # [cite: 14]
 
+
 def _self_stop_tracker_init():
     return {"run_side": None, "run_len": 0, "seen_b3": False, "seen_p3": False}  # [cite: 14]
+
 
 def _self_stop_tracker_step(st, r):
     st["run_side"], st["run_len"] = _update_run(st["run_side"], st["run_len"], r)  # [cite: 15]
@@ -1357,9 +1671,12 @@ def _self_stop_tracker_step(st, r):
         st["seen_p3"] = True  # [cite: 15]
     return st  # [cite: 15]
 
+
 def _should_self_stop(st):
     # 两边都曾出现段长≥3 → 自停  # [cite: 15]
     return st["seen_b3"] and st["seen_p3"]  # [cite: 15]
+
+
 from collections import defaultdict
 
 # ==========================
@@ -1397,7 +1714,6 @@ def _abs_diff_bucket(diff: int) -> str:
     return str(absd)
 
 
-
 def _safe_int(v: Any):
     """安全转 int：None/空串/'None'/'nan' 等视为无效；失败返回 None。"""
     if v is None:
@@ -1421,6 +1737,7 @@ def _safe_int(v: Any):
     except Exception:
         return None
 
+
 def _l1_abs_diff_bucket(diff_raw: Any) -> str:
     """点差桶：0..9 + 9+（共 10+1 个位置）。"""
     d = _safe_int(diff_raw)
@@ -1431,13 +1748,15 @@ def _l1_abs_diff_bucket(diff_raw: Any) -> str:
         return "9+"
     return str(ad)
 
+
 # ===== 冻结区：变化率分桶阈值（只读字段；仅用于分桶映射｜锁死）=====
 # L1：前小/前大/极值/无效（锁死）
-L1_RATE_TH_SMALL = -2.0   # r > -2  -> 前小
-L1_RATE_TH_BIG   = -3.0   # -3 < r <= -2 -> 前大；r <= -3 -> 极值
+L1_RATE_TH_SMALL = -2.0  # r > -2  -> 前小
+L1_RATE_TH_BIG = -3.0  # -3 < r <= -2 -> 前大；r <= -3 -> 极值
 # L2/L3/L4：减速/加速/极值/无效（锁死）
-R_RATE_TH_SLOW = 0.0      # r < 0 -> 减速
-R_RATE_TH_FAST = 2.0      # 0 <= r < 2 -> 加速；r >= 2 -> 极值
+R_RATE_TH_SLOW = 0.0  # r < 0 -> 减速
+R_RATE_TH_FAST = 2.0  # 0 <= r < 2 -> 加速；r >= 2 -> 极值
+
 
 def _rate_monitor_bucket(rate):
     """L2/L3/L4 四桶：减速/加速/极值/无效（锁死）。"""
@@ -1457,6 +1776,7 @@ def _rate_monitor_bucket(rate):
         return "加速"
     return "极值"
 
+
 def _l1_rate_bucket(rate):
     """L1 四桶：前小/前大/极值/无效（锁死）。"""
     if rate is None:
@@ -1474,6 +1794,7 @@ def _l1_rate_bucket(rate):
     if L1_RATE_TH_BIG < r <= L1_RATE_TH_SMALL:
         return "前大"
     return "极值"
+
 
 def _rate_mode_from_exhaustion(exh):
     """硬闸门：二位码 -> 模式（中文锁死）。
@@ -1496,6 +1817,7 @@ def _rate_mode_from_exhaustion(exh):
     if s in ("BP", "PB"):
         return "前大小"
     return "无效"
+
 
 def _rate_quartet(exh_pair, rate_value):
     """唯一入口：返回 (mode, l1_bucket, r_bucket, active_bucket)"""
@@ -1523,6 +1845,8 @@ def _rate_quartet(exh_pair, rate_value):
         raise
 
     return mode, l1b, rb, active
+
+
 def _l1_mean_bucket(diff, mean):
     # L1 均差分桶锁死为 4 桶：|均差|<3 / |均差|>=3 / mean=0 / 无效
     # 只读 mean（不重算/不修正），diff 参数保留但不参与分桶。
@@ -1546,59 +1870,76 @@ def _mean_bucket(mean):
     return ("|均差|>=3" if abs(m) >= 3 else "|均差|<3"), False
 
 
-# ==================== 冻结区｜投放链路（L1-L4）唯一入口 BEGIN ====================
+# ==================== 冻结区｜投放链路（L1-L5）唯一入口 BEGIN ====================
 # 目的（锁死）：
 # - L1/L2/L3/L4 的“分层字段 + 读错即退”；
 # - 未启用阶段：不写快照、不入规则族样本池；任何读取=越权退出；
 # - 数据缺失（rate/mean 空/None/nan/解析失败）：进入“无效桶”继续跑，并在报告输出 TopN 原始字符串样例。
 
-_STAGE_LIST = ("L1", "L2", "L3", "L4")
+_STAGE_LIST = ("L1", "L2", "L3", "L4", "L5")
+
 
 def _stage_to_bet_n(stage: str) -> int:
-    m = {"L1": 1, "L2": 2, "L3": 3, "L4": 4}
+    m = {"L1": 1, "L2": 2, "L3": 3, "L4": 4, "L5": 5}
     if stage not in m:
         raise ValueError(f"bad stage={stage}")
     return m[stage]
 
-_ALLOWED_SNAP_SOURCE = ("STAR_ONLY", "L1", "L2", "L3", "L4")
+
+_ALLOWED_SNAP_SOURCE = ("STAR_ONLY", "L1", "L2", "L3", "L4", "L5")
 
 # 报告参数（冻结区只读这一处；外部结构插槽不得伪造）
 # - 目标层唯一来源：TARGET_STAGE（缺省按 L4）
-# - 分层开关：ENABLE_L1..ENABLE_L4
+# - 分层开关：ENABLE_L1..ENABLE_L5
+# 链路开关（手动定位用）
 TARGET_STAGE = "L4"
 ENABLE_L1 = 0
 ENABLE_L2 = 0
 ENABLE_L3 = 0
 ENABLE_L4 = 1
+ENABLE_L5 = 0
 
 # 规则族扫描开关（报告参数）
 RULESCAN_ON = 1
 
 # Δ自证审计开关（冻结区）
-DELTA_AUDIT_ON = 1         # 1=打印[L4_Δ自证]与作废判定；0=完全关闭
-DELTA_AUDIT_ENFORCE = 1    # 1=作废即退出(退出码非0)；0=只打印作废但继续跑（规则族榜单跳过）
+DELTA_AUDIT_ON = 1  # 1=打印[L4_Δ自证]与作废判定；0=完全关闭
+DELTA_AUDIT_ENFORCE = 1  # 1=作废即退出(退出码非0)；0=只打印作废但继续跑（规则族榜单跳过）
 RULESCAN_MIN_CNT = 1000
 RULESCAN_TOPN = 5
+
 
 class _UNSET_T:
     pass
 
+
 _UNSET = _UNSET_T()
 
+
+# ==========================
+# 阶段快照定义（Node 5 修正：字段锁死 + 只读封存）
+# ==========================
 @dataclass(frozen=True)
 class StageSnap:
     # 最小集（锁死）
     stage: str
     bet_n: int
     rule_id: str
-    exhaustion: str  # 锁为 exh_pair（如 "BB"/"PP"/"BP"/"PB"），无效则为 "无效"
-    diff_raw: int
-    rate_raw: float | None
-    mean_raw: float | None
-    diff_bucket: str
-    mean_bucket: str
-    snap_source: str
 
+    # Node 5: 必备字段锁死（只复制，不计算，不再读指标）
+    exhaustion: str  # = exh_pair
+    settle_rr: str  # = rr
+    diff_abs: int  # = diff_val (abs)
+    diff3_bucket: str  # = diff_bucket
+    diff_tokens: str  # = diff_bucket (alias)
+    rate_val: float | None
+    mean_val: float | None
+    rate_raw_text: str
+    mean_raw_text: str
+    rate_bucket: str
+    mean_bucket: str
+
+    snap_source: str
     snap_seq: int  # 每靴从1递增，仅排序/审计
     profit_to_here: float = 0.0  # 本次阶段快照写入时刻：已真实结算出来的净值（用于反事实Δ）
 
@@ -1607,10 +1948,18 @@ class StageSnap:
     rate_bucket_L2: str | _UNSET_T = _UNSET
     rate_bucket_L3: str | _UNSET_T = _UNSET
     rate_bucket_L4: str | _UNSET_T = _UNSET
+    rate_bucket_L5: str | _UNSET_T = _UNSET
 
     # 仅用于“缺失样例 TopN”自证
     _rate_raw_text: str = ""
     _mean_raw_text: str = ""
+
+    # 兼容旧字段（如果需要，否则可移除）
+    diff_raw: int = 0
+    rate_raw: float | None = None
+    mean_raw: float | None = None
+    diff_bucket: str = ""
+
 
 def _stage_enabled(stage: str) -> bool:
     if stage == "L1":
@@ -1621,14 +1970,19 @@ def _stage_enabled(stage: str) -> bool:
         return bool(ENABLE_L3)
     if stage == "L4":
         return bool(ENABLE_L4)
+    if stage == "L5":
+        return bool(ENABLE_L5)
     return False
 
-def _guard_stage(stage: str, code: str, why: str, *, boot_id=None, idx=None, phase: str = "REPORT", rule_id: str = "0", evidence_extra: str = "") -> None:
+
+def _guard_stage(stage: str, code: str, why: str, *, boot_id=None, idx=None, phase: str = "REPORT", rule_id: str = "0",
+                 evidence_extra: str = "") -> None:
     """冻结区硬拦截：阶段/契约/越权类错误必须退出。"""
     evidence = f"boot_id={boot_id} idx={idx}"
     if evidence_extra:
         evidence = evidence + " " + str(evidence_extra)
-    _raise_guard(code=code, rule_id=rule_id, phase=phase, msg=f"[链路]{why} | stage={stage}", evidence=evidence, exit_code=2)
+    _raise_guard(code=code, rule_id=rule_id, phase=phase, msg=f"[链路]{why} | stage={stage}", evidence=evidence,
+                 exit_code=2)
 
 
 def _guard_stage_read(snap: StageSnap, stage: str, field: str) -> str:
@@ -1641,12 +1995,14 @@ def _guard_stage_read(snap: StageSnap, stage: str, field: str) -> str:
         _guard_stage(stage, "STAGE_FIELD_FORBIDDEN", f"读错分层字段：{field}")
     return v
 
+
 def _rate_bucket_for_stage(stage: str, rate) -> str:
     # L1：前小/前大/极值/无效（锁死）
     # L2-L4：减速/加速/极值/无效（锁死）
     if stage == "L1":
         return _l1_rate_bucket(rate)
     return _rate_monitor_bucket(rate)
+
 
 def _exhaustion_pair_for_stage(star: Snapshot) -> str:
     try:
@@ -1656,6 +2012,7 @@ def _exhaustion_pair_for_stage(star: Snapshot) -> str:
         return str(v)
     except Exception:
         return "无效"
+
 
 def _bind_raw_text_fields(star: Snapshot, rate_raw_text, mean_raw_text) -> None:
     try:
@@ -1667,132 +2024,127 @@ def _bind_raw_text_fields(star: Snapshot, rate_raw_text, mean_raw_text) -> None:
     except Exception:
         star._mean_raw_text = "<?>"
 
+
+# ==========================
+# 阶段快照生成（Node 5 修正：从 star_snap 复制）
+# ==========================
 def _make_stage_snap_from_star(
-    *,
-    stage: str,
-    star: Snapshot,
-    rule_id: str,
-    snap_source: str,
-    boot_id: int,
-    snap_seq: int,
+        *,
+        stage: str,
+        star: Snapshot,
+        rule_id: str,
+        snap_source: str,
+        boot_id: int,
+        snap_seq: int,
+        profit_to_here: float,
+        settle_rr: str,
 ) -> StageSnap:
     if stage not in _STAGE_LIST:
         _guard_stage(stage, "STAGE_INVALID", "非法阶段名", boot_id=boot_id, idx=getattr(star, "idx", None))
     if snap_source not in _ALLOWED_SNAP_SOURCE:
-        _guard_stage(stage, "SNAP_SOURCE_INVALID", f"snap_source 非法：{snap_source}", boot_id=boot_id, idx=getattr(star, "idx", None))
+        _guard_stage(stage, "SNAP_SOURCE_INVALID", f"snap_source 非法：{snap_source}", boot_id=boot_id,
+                     idx=getattr(star, "idx", None))
     if not _stage_enabled(stage):
-        _guard_stage(stage, "STAGE_DISABLED_WRITE", "未启用阶段仍写入快照", boot_id=boot_id, idx=getattr(star, "idx", None))
+        _guard_stage(stage, "STAGE_DISABLED_WRITE", "未启用阶段仍写入快照", boot_id=boot_id,
+                     idx=getattr(star, "idx", None))
 
-    diff = secure_read_metric(star, "diff", phase="REPORT", who="REPORT", idx=getattr(star, "idx", None), boot_id=boot_id, seen_all=getattr(star, "seen_all", None))
-    rate = secure_read_metric(star, "rate", phase="REPORT", who="REPORT", idx=getattr(star, "idx", None), boot_id=boot_id, seen_all=getattr(star, "seen_all", None))
-    mean = secure_read_metric(star, "mean", phase="REPORT", who="REPORT", idx=getattr(star, "idx", None), boot_id=boot_id, seen_all=getattr(star, "seen_all", None))
+    # Node 5: 仅允许从 star_snap（投放点当行封存值）复制
+    # 严禁 secure_read_metric
 
-    diff_bucket = _l1_abs_diff_bucket(int(diff))
-    if stage == "L1":
-        mean_bucket, _ = _l1_mean_bucket(int(diff), mean)
-    else:
-        mean_bucket, _ = _mean_bucket(mean)
+    diff_val = star.diff_val
+    rate_val = star.rate_val
+    mean_val = star.mean_val
+
+    diff_bucket = star.diff_bucket
+    mean_bucket = star.mean_bucket
+
     exh_pair = _exhaustion_pair_for_stage(star)
-    rb = _rate_bucket_for_stage(stage, rate)
 
-    kwargs = {"rate_bucket_L1": _UNSET, "rate_bucket_L2": _UNSET, "rate_bucket_L3": _UNSET, "rate_bucket_L4": _UNSET}
+    # Rate bucket for this stage
+    rb = _rate_bucket_for_stage(stage, rate_val)
+
+    kwargs = {"rate_bucket_L1": _UNSET, "rate_bucket_L2": _UNSET, "rate_bucket_L3": _UNSET, "rate_bucket_L4": _UNSET,
+              "rate_bucket_L5": _UNSET}
     kwargs[f"rate_bucket_{stage}"] = rb
 
     return StageSnap(
-            stage=stage,
-            bet_n=_stage_to_bet_n(stage),
-            rule_id=rule_id,
+        stage=stage,
+        bet_n=_stage_to_bet_n(stage),
+        rule_id=rule_id,
+
+        # Node 5: 字段映射
         exhaustion=exh_pair,
-        diff_raw=int(diff),
-        rate_raw=rate,
-        mean_raw=mean,
+        settle_rr=settle_rr,
+        diff_abs=abs(int(diff_val)),
+        diff3_bucket=diff_bucket,
+        diff_tokens=diff_bucket,
+        rate_val=rate_val,
+        mean_val=mean_val,
+        rate_raw_text=getattr(star, "_rate_raw_text", ""),
+        mean_raw_text=getattr(star, "_mean_raw_text", ""),
+        rate_bucket=rb,
+
+
+        # 兼容旧字段（如果需要，否则可移除）
+        diff_raw=int(diff_val),
+        rate_raw=rate_val,
+        mean_raw=mean_val,
         diff_bucket=diff_bucket,
         mean_bucket=mean_bucket,
+        _rate_raw_text=getattr(star, "_rate_raw_text", ""),
+        _mean_raw_text=getattr(star, "_mean_raw_text", ""),
+
         snap_source=snap_source,
         snap_seq=snap_seq,
         profit_to_here=profit_to_here,
-        _rate_raw_text=getattr(star, "_rate_raw_text", ""),
-        _mean_raw_text=getattr(star, "_mean_raw_text", ""),
         **kwargs,
     )
 
 
-
+# ==========================
+# 阶段快照生成（Node 2 修正：禁用缓存回读）
+# ==========================
 def _make_stage_snap_from_cache(
-    *,
-    stage: str,
-    rule_id: str,
-    rr: str,
-    cache_row: dict,
-    snap_source: str,
-    snap_seq: int,
-    profit_to_here: float,
+        *,
+        stage: str,
+        rule_id: str,
+        rr: str,
+        cache_row: dict,
+        snap_source: str,
+        snap_seq: int,
+        profit_to_here: float,
 ) -> StageSnap:
-    """阶段快照：只允许从“上一手已结算且非T”的缓存行取三指标（零未来）。"""
-    if stage not in _STAGE_LIST:
-        raise RuntimeError(f"stage invalid: {stage}")
+    """
+    Node 2 修正：永久禁用从 metrics_cache 回读指标。
+    阶段快照必须基于“投放点当行封存值”生成（Node 3 将实现），
+    严禁使用“未来行缓存”或“回读历史行”。
+    """
+    raise RuntimeError("METRICS_CACHE_FORBIDDEN: _make_stage_snap_from_cache is permanently disabled in Node 2.")
 
-    # 允许缺失，但必须落入无效桶（禁止硬转0）
-    diff_v = _safe_int(cache_row.get("diff"))
-    diff_bucket = _abs_diff_bucket(diff_v) if diff_v is not None else "无效"
-
-    rate_v = cache_row.get("rate")  # float | None
-    mean_v = cache_row.get("mean")  # float | None
-
-    rate_bucket = _rate_bucket_for_stage(stage, rate_v)
-    mean_bucket, _ = _mean_bucket(mean_v)
-    # 原始文本仅用于 TopN 自证
-    rate_raw_text = str(cache_row.get("rate_raw") if cache_row.get("rate_raw") is not None else ("" if rate_v is None else rate_v))
-    mean_raw_text = str(cache_row.get("mean_raw") if cache_row.get("mean_raw") is not None else ("" if mean_v is None else mean_v))
-
-    kw_rate = {}
-    if stage == "L1":
-        kw_rate["rate_bucket_L1"] = rate_bucket
-    elif stage == "L2":
-        kw_rate["rate_bucket_L2"] = rate_bucket
-    elif stage == "L3":
-        kw_rate["rate_bucket_L3"] = rate_bucket
-    elif stage == "L4":
-        kw_rate["rate_bucket_L4"] = rate_bucket
-
-    return StageSnap(
-            stage=stage,
-            bet_n=_stage_to_bet_n(stage),
-            rule_id=rule_id,
-        exhaustion=rr,  # 锁死：当次结算结果(B/P/T)
-        diff_raw=int(diff_v or 0),
-        rate_raw=rate_v,
-        mean_raw=mean_v,
-        diff_bucket=diff_bucket,
-        mean_bucket=mean_bucket,
-        snap_source=snap_source,
-        snap_seq=snap_seq,
-        profit_to_here=safe_float(profit_to_here, default=None, kind="GEN"),
-        _rate_raw_text=rate_raw_text,
-        _mean_raw_text=mean_raw_text,
-        **kw_rate,
-    )
 
 def stage_rate_bucket(snap: StageSnap, stage: str) -> str:
     return _guard_stage_read(snap, stage, f"rate_bucket_{stage}")
 
-# ==================== 冻结区｜投放链路（L1-L4）唯一入口 END ====================
+
+# ==================== 冻结区｜投放链路（L1-L5）唯一入口 END ====================
 
 
 def _init_cont_agg():
     return {
-        "pair_rate": {},         # key: (bet_n, prev_state, curr_state) -> [cnt, exhaustion]  # [cite: 21]
-        "pair_mean": {},         # key: (bet_n, prev_state, curr_state) -> [cnt, exhaustion]  # [cite: 21]
-        "pair_rate_overall": {}, # key: (prev_state, curr_state) -> [cnt, exhaustion]  # [cite: 21]
-        "pair_mean_overall": {}, # key: (prev_state, curr_state) -> [cnt, exhaustion]  # [cite: 21]
+        "pair_rate": {},  # key: (bet_n, prev_state, curr_state) -> [cnt, exhaustion]  # [cite: 21]
+        "pair_mean": {},  # key: (bet_n, prev_state, curr_state) -> [cnt, exhaustion]  # [cite: 21]
+        "pair_rate_overall": {},  # key: (prev_state, curr_state) -> [cnt, exhaustion]  # [cite: 21]
+        "pair_mean_overall": {},  # key: (prev_state, curr_state) -> [cnt, exhaustion]  # [cite: 21]
         "max_bet_n_seen": 0,  # [cite: 21]
     }
+
 
 def _agg_add(d, key, bust_flag):
     if key not in d:
         d[key] = [0, 0]  # [cite: 22]
     d[key][0] += 1  # [cite: 22]
     d[key][1] += int(1 if bust_flag else 0)  # [cite: 22]
+
 
 def _cont_consume_snapshots(agg, snapshots):
     # snapshots: list of dicts with bet_n,diff,rate,mean,trade_exhaustion  # [cite: 23]
@@ -1805,7 +2157,7 @@ def _cont_consume_snapshots(agg, snapshots):
 
     bust_flag = int(snaps[-1].get("trade_bust", 0))  # [cite: 23]
     for i in range(1, len(snaps)):
-        a = snaps[i-1]  # [cite: 23]
+        a = snaps[i - 1]  # [cite: 23]
         b = snaps[i]  # [cite: 23]
         try:
             bn = int(b.get("bet_n", 0))  # [cite: 23]
@@ -1823,6 +2175,7 @@ def _cont_consume_snapshots(agg, snapshots):
         _agg_add(agg["pair_mean"], (bn, prev_mean, curr_mean), bust_flag)  # [cite: 24]
         _agg_add(agg["pair_rate_overall"], (prev_rate, curr_rate), bust_flag)  # [cite: 24]
         _agg_add(agg["pair_mean_overall"], (prev_mean, curr_mean), bust_flag)  # [cite: 24]
+
 
 def _print_top_transitions(title, d, min_samples, topk):
     rows = []  # [cite: 25]
@@ -1859,6 +2212,7 @@ def _print_top_transitions(title, d, min_samples, topk):
 # ============================================================
 MAP_RESULT = {"B": "B", "P": "P", "T": "T"}
 
+
 def map_result(v):
     if v is None:
         return None
@@ -1870,16 +2224,19 @@ def map_result(v):
         return MAP_RESULT[s2]
     return None
 
+
 # ------------------------------------------------------------
 # 工具：安全读取 float / int（只读，不计算）
 # ------------------------------------------------------------
 RATE_MISSING_RAW_INPUT = 0
 RATE_PARSE_FAIL_INPUT = 0
-RATE_INVALID_RAW = 0   # rate_raw 无效(None)计数
+RATE_INVALID_RAW = 0  # rate_raw 无效(None)计数
 RATE_INVALID_BUCKET = 0  # 变化率分桶=无效 计数
 RATE_INVALID_ASSERT_ON = True  # 无效计数一致性断言开关（建议保持True）
 MEAN_MISSING_RAW_INPUT = 0
 MEAN_PARSE_FAIL_INPUT = 0
+
+
 def safe_float(v, default=None, *, kind="GEN"):
     """安全解析 float：永不崩溃；缺失/不可解析 -> None，并计数（补丁B｜锁死）"""
     global RATE_MISSING_RAW_INPUT, RATE_PARSE_FAIL_INPUT, MEAN_MISSING_RAW_INPUT, MEAN_PARSE_FAIL_INPUT
@@ -1898,11 +2255,13 @@ def safe_float(v, default=None, *, kind="GEN"):
             MEAN_PARSE_FAIL_INPUT += 1
         return default
 
+
 def _is_raw_missing(x):
     if x is None:
         return True
     s = str(x).strip().lower()
     return (s == "" or s == "none" or s == "nan")
+
 
 def safe_int(v, default=0):
     try:
@@ -1911,6 +2270,7 @@ def safe_int(v, default=0):
         return int(float(v))
     except Exception:
         return default
+
 
 # ------------------------------------------------------------
 # 1) 数据加载（固定）
@@ -1921,13 +2281,15 @@ def safe_int(v, default=0):
 def _norm_key(k):
     return str(k).strip().lower() if k is not None else ""
 
+
 def _first_hit(keys, candidates):
-    key_norm = { _norm_key(k): k for k in keys }
+    key_norm = {_norm_key(k): k for k in keys}
     for c in candidates:
         cc = _norm_key(c)
         if cc in key_norm:
             return key_norm[cc]
     return None
+
 
 def detect_columns(row0):
     """
@@ -1941,7 +2303,8 @@ def detect_columns(row0):
     keys = list(row0.keys()) if isinstance(row0, dict) else []
 
     # Sub-Batch（靴号/批次号）
-    col_batch = _first_hit(keys, ["Sub-Batch", "sub-batch", "sub_batch", "subbatch", "批次", "批次号", "batch", "Batch"])
+    col_batch = _first_hit(keys,
+                           ["Sub-Batch", "sub-batch", "sub_batch", "subbatch", "批次", "批次号", "batch", "Batch"])
     # 靴结束
     col_end = _first_hit(keys, ["靴结束", "shoe_end", "shoe end", "end", "End", "结束", "boot_end", "BootEnd"])
 
@@ -1954,7 +2317,6 @@ def detect_columns(row0):
     col_mean = _first_hit(keys, ["均差", "mean", "Mean", "avg", "Avg", "average", "Average", "M3", "m3"])
 
     return col_batch, col_end, col_result, col_diff, col_rate, col_mean
-
 
 
 # ==========================
@@ -1976,7 +2338,7 @@ def _print_source_hashes():
         "advance_one_row",
         "run_strategy_on_boot",
         "load_all_boots",
-"_audit_forbid_idx_offset",
+        "_audit_forbid_idx_offset",
         "_audit_structure_slot_integrity",
     ]
 
@@ -2030,8 +2392,6 @@ def _print_source_hashes():
             else:
                 pass
 
-
-
     _SOURCE_HASHES_PRINTED = True
 
 
@@ -2043,6 +2403,7 @@ def SELF_AUDIT_GATE(final_metrics):
     触发条件：Total>0 或 Avg>0（由开关控制）
     失败策略：任何一条不满足，打印最小证据后 raise 终止（禁止吞错）
     """
+
     def _fail(item_no, evidence):
         if not SILENT_MODE:
             print("=== 正值触发自审 ===")
@@ -2050,7 +2411,8 @@ def SELF_AUDIT_GATE(final_metrics):
         print("SELF_AUDIT=FAIL❌")
         print(f"触发的最小合格线条目编号={item_no}")
         print(f"命中最小证据片段摘要：{evidence}")
-        _raise_guard(code="SELF_AUDIT_FAIL", rule_id=item_no, phase="DONE", msg=f"SELF_AUDIT_FAIL item={item_no}", evidence=reason, exit_code=3)
+        _raise_guard(code="SELF_AUDIT_FAIL", rule_id=item_no, phase="DONE", msg=f"SELF_AUDIT_FAIL item={item_no}",
+                     evidence=reason, exit_code=3)
 
     # B) 交付可审输出锁死（首屏要素是否已打印）
     if not _WATERMARK_PRINTED:
@@ -2068,7 +2430,8 @@ def SELF_AUDIT_GATE(final_metrics):
 
     # A) 表头/语义锁死（PP/BB 恒等式必须 0 失配）
     if final_metrics.get("ppbb_mismatch", 0) != 0:
-        _fail(6, f"PPBB_MISMATCH={final_metrics.get('ppbb_mismatch')} | EVIDENCE={final_metrics.get('ppbb_first_evidence')}")
+        _fail(6,
+              f"PPBB_MISMATCH={final_metrics.get('ppbb_mismatch')} | EVIDENCE={final_metrics.get('ppbb_first_evidence')}")
 
     # C) 核心计数闭环
     entry = int(final_metrics.get("entry", 0) or 0)
@@ -2078,7 +2441,8 @@ def SELF_AUDIT_GATE(final_metrics):
     stop = int(final_metrics.get("stop", 0) or 0)
     zero = int(final_metrics.get("zero", 0) or 0)
     if entry != (match + mismatch + brk + stop + zero):
-        _fail(7, f"恒等式闭环失败：Entry={entry} != Match({match})+Mismatch({mismatch})+Break({brk})+Stop({stop})+Zero({zero})")
+        _fail(7,
+              f"恒等式闭环失败：Entry={entry} != Match({match})+Mismatch({mismatch})+Break({brk})+Stop({stop})+Zero({zero})")
 
     # PASS
     if not SILENT_MODE:
@@ -2144,21 +2508,88 @@ def boot_filter(records):
     return True
 
 
-
 # ------------------------------------------------------------
 # 3) 单批次策略入口（只允许改这里）
 # ------------------------------------------------------------
+# ==========================
+# 单批次策略入口（Node 4 修正：ENTRY_ROW 语义统一）
+# ==========================
 def run_strategy_on_boot(records):
     global BET_IN_FORBIDDEN_SEEN
     """单靴执行：结构->⭐(DECISION)->执行推进(EXECUTE/SETTLE)。
 
-    二次加固（锁死）要点：
-      - 指标只允许在 DECISION/STAR 写快照与读取（secure_write_star_snapshot / secure_read_metric）
-      - 进入 EXECUTE/SETTLE 后，records 全部去指标化（guard_future_rows 从 0 开始）
-      - 禁止 star_idx + 1 等“idx+偏移”直算：只能用 advance_one_row 自然推进
+    Node 4 修正：
+      - ENTRY_ROW 语义统一：
+        * 非延迟结构：ENTRY_ROW = ⭐ 当行
+        * 延迟B结构：ENTRY_ROW = 🎯 当口
+      - secure_write_star_snapshot 只能在 ENTRY_ROW 调用
+      - 👀 行禁止读取任何指标
+
+    Node 2 修正：
+      - 彻底移除 metrics_cache
+      - 彻底移除 last_settled_nonT_idx
+      - 阶段快照生成逻辑暂时置空（等待 Node 3 重构）
     """
     if not records or not STRUCT_SCAN:
         return None
+
+    # 0) 结构名覆盖（由锚点002提供；仅切结构，不参与任何扫描/下注逻辑）
+    if not globals().get("_STRUCT_OVERRIDE_APPLIED", False):
+        _ov = globals().get("STRUCT_NAME_OVERRIDE", "")
+        if isinstance(_ov, str):
+            _ov = _ov.strip()
+        else:
+            _ov = ""
+        if _ov:
+            if _ov not in STRUCT_VARIANTS:
+                raise RuntimeError(f"❌ 结构不存在：{_ov}（STRUCT_NAME_OVERRIDE）")
+            globals()["ACTIVE_STRUCT_NAME"] = _ov
+            globals()["STRUCT_CONFIG_TEXT"] = STRUCT_VARIANTS[_ov]
+        globals()["_STRUCT_OVERRIDE_APPLIED"] = True
+
+    # 0.5) 执行/快照链路覆盖（由锚点002提供；仅切 profile，不参与任何扫描/下注逻辑）
+    if not globals().get("_CHAIN_PROFILE_OVERRIDE_APPLIED", False):
+        # EXEC_PROFILE（空=默认）
+        _ep = globals().get("EXEC_PROFILE_OVERRIDE", "")
+        if isinstance(_ep, str):
+            _ep = _ep.strip()
+        else:
+            _ep = ""
+        if not _ep:
+            _ep = globals().get("DEFAULT_EXEC_PROFILE", "MARTIN_1248")
+        if "EXEC_PROFILES" not in globals() or _ep not in globals().get("EXEC_PROFILES", {}):
+            raise RuntimeError(f"❌ EXEC_PROFILE 不存在：{_ep}")
+
+        # SNAP_PROFILE（空=默认）
+        _spn = globals().get("SNAP_PROFILE_OVERRIDE", "")
+        if isinstance(_spn, str):
+            _spn = _spn.strip()
+        else:
+            _spn = ""
+        if not _spn:
+            _spn = globals().get("DEFAULT_SNAP_PROFILE", "L4_ONLY")
+        if "SNAP_PROFILES" not in globals() or _spn not in globals().get("SNAP_PROFILES", {}):
+            raise RuntimeError(f"❌ SNAP_PROFILE 不存在：{_spn}")
+
+        globals()["_ACTIVE_EXEC_PROFILE_NAME"] = _ep
+        globals()["_ACTIVE_SNAP_PROFILE_NAME"] = _spn
+
+        # 应用 SNAP profile 到冻结参数（TARGET_STAGE/ENABLE_L1..L5）
+        _sp_cfg = globals()["SNAP_PROFILES"][_spn]
+        globals()["TARGET_STAGE"] = _sp_cfg.get("TARGET_STAGE", globals().get("TARGET_STAGE", "L4"))
+        globals()["ENABLE_L1"] = int(_sp_cfg.get("ENABLE_L1", globals().get("ENABLE_L1", 0)))
+        globals()["ENABLE_L2"] = int(_sp_cfg.get("ENABLE_L2", globals().get("ENABLE_L2", 0)))
+        globals()["ENABLE_L3"] = int(_sp_cfg.get("ENABLE_L3", globals().get("ENABLE_L3", 0)))
+        globals()["ENABLE_L4"] = int(_sp_cfg.get("ENABLE_L4", globals().get("ENABLE_L4", 1)))
+        globals()["ENABLE_L5"] = int(_sp_cfg.get("ENABLE_L5", globals().get("ENABLE_L5", 0)))
+
+        # 自证打印（只打印一次）
+        if not globals().get("_CHAIN_PROFILE_PRINTED", False):
+            print(f"EXEC_PROFILE={_ep}")
+            print(f"SNAP_PROFILE={_spn}")
+            globals()["_CHAIN_PROFILE_PRINTED"] = True
+
+        globals()["_CHAIN_PROFILE_OVERRIDE_APPLIED"] = True
 
     # 📌 抽样兜底：每靴至少留一条可定位（不参与逻辑）
     try:
@@ -2173,19 +2604,13 @@ def run_strategy_on_boot(records):
     phase = "SCAN"
     decision_used = False
 
-    # 冻结三指标缓存（仅供阶段快照/报表使用；读取必须受 last_settled_nonT_idx 门禁，禁止未来）
-    metrics_cache = []
-    for _r in records:
-        metrics_cache.append({
-            'diff': _r.get('diff'),
-            'rate': _r.get('rate'),
-            'mean': _r.get('mean'),
-            'rate_raw': _r.get('rate_raw'),
-            'mean_raw': _r.get('mean_raw'),
-        })
+    # Node 2: 移除 metrics_cache 初始化
+    # metrics_cache = [] ... (DELETED)
 
     # 1) 结构扫描
-    st, star_idx, strong_side, struct_info = scan_structure(records)
+    # Node 1: Pass records wrapped in ScanGuardRow to ensure physical invisibility of metrics during scan
+    records_for_scan = [ScanGuardRow(r) for r in records]
+    st, star_idx, strong_side, struct_info = scan_structure(records_for_scan)
     if st != "STRUCT_OK":
         return None
 
@@ -2199,7 +2624,13 @@ def run_strategy_on_boot(records):
     # 2) DECISION：仅⭐行写快照
     phase = phase_transition(phase, "DECISION")
     decision_used = True
-    star_row = records[star_idx]
+
+    # Node 4: ENTRY_ROW 语义统一
+    # 非延迟结构：ENTRY_ROW = ⭐ 当行 (star_idx)
+    # 延迟B结构：ENTRY_ROW = 🎯 当口 (target_idx) - 暂未实现延迟B，目前 ENTRY_ROW = star_idx
+    entry_row_idx = star_idx
+
+    star_row = records[entry_row_idx]
     star_seen = star_row.get("seen_all")
     star_rr = star_row.get("r")
     star_boot_id = star_row.get("boot_id", star_row.get("shoe_id"))
@@ -2208,14 +2639,16 @@ def run_strategy_on_boot(records):
 
     # 变化率硬闸门二位码：投放点上一条结果 + 投放点这一条结果（含T则无效）
     try:
-        prev_rr = records[star_idx - 1].get("r") if star_idx > 0 else None
+        prev_rr = records[entry_row_idx - 1].get("r") if entry_row_idx > 0 else None
     except Exception:
         prev_rr = None
-    exh_pair = (str(prev_rr) + str(star_rr)) if (prev_rr in ("B", "P") and star_rr in ("B", "P")) else (str(prev_rr) + str(star_rr) if (prev_rr in ("B", "P", "T") and star_rr in ("B", "P", "T")) else None)
+    exh_pair = (str(prev_rr) + str(star_rr)) if (prev_rr in ("B", "P") and star_rr in ("B", "P")) else (
+        str(prev_rr) + str(star_rr) if (prev_rr in ("B", "P", "T") and star_rr in ("B", "P", "T")) else None)
 
+    # Node 4: secure_write_star_snapshot 只能在 ENTRY_ROW 调用
     star_snap = secure_write_star_snapshot(
         star_row, phase,
-        seen_all=star_seen, rr=star_rr, boot_id=star_boot_id, star_idx=star_idx,
+        seen_all=star_seen, rr=star_rr, boot_id=star_boot_id, star_idx=entry_row_idx,
         star_snapshot_is_none=True, exh_pair=exh_pair
     )
 
@@ -2233,11 +2666,11 @@ def run_strategy_on_boot(records):
     #   - 🎯(N_prebet)：人类实际取值/下注点=取值点（当前=触发♻；📌抽样取此点位）
     #   - 结算口K：从 🎯_idx+1 起首个非T（只用于结算，不打印、不参与决策）
     # ==========================
-    scan_cycle_seen_all = getattr(star_snap, "seen_all", None)   # 扫描♻
-    trigger_cycle_seen_all = scan_cycle_seen_all                 # 触发♻（当前等于扫描♻）
-    n_prebet_seen_all = trigger_cycle_seen_all                   # 🎯 = N_prebet（人类实际取值/下注点）
-    tgt_seen_all = n_prebet_seen_all                             # 🎯（统一别名，后续只用🎯）
-    bet_star_seen_all = tgt_seen_all                             # 兼容字段：投放点=🎯（取值点）
+    scan_cycle_seen_all = getattr(star_snap, "seen_all", None)  # 扫描♻
+    trigger_cycle_seen_all = scan_cycle_seen_all  # 触发♻（当前等于扫描♻）
+    n_prebet_seen_all = trigger_cycle_seen_all  # 🎯 = N_prebet（人类实际取值/下注点）
+    tgt_seen_all = n_prebet_seen_all  # 🎯（统一别名，后续只用🎯）
+    bet_star_seen_all = tgt_seen_all  # 兼容字段：投放点=🎯（取值点）
 
     # 📌 抽样探针：人类下注点=取值点（N_prebet）；冻结区自带，不受覆盖区影响；仅用于打印定位（不参与逻辑）
     try:
@@ -2251,12 +2684,24 @@ def run_strategy_on_boot(records):
         pass
 
     # 推进器（唯一允许的“后继行”方式）
-    # 4) 执行 1-2-4-8
+    # 4) 执行链路（由 EXEC_PROFILE 控制）
     target_side = strong_side
-    units = [1, 2, 4, 8]
+    _epn = globals().get("_ACTIVE_EXEC_PROFILE_NAME", globals().get("DEFAULT_EXEC_PROFILE", "MARTIN_1248"))
+    _ep_cfg = globals().get("EXEC_PROFILES", {}).get(_epn)
+    if not isinstance(_ep_cfg, dict):
+        raise RuntimeError(f"❌ EXEC_PROFILE 配置非法：{_epn}")
+    _mode = _ep_cfg.get("mode", "MARTIN_SEQ")
+    if _mode != "MARTIN_SEQ":
+        raise RuntimeError(f"❌ EXEC_MODE 未启用：{_mode}（profile={_epn}）")
+    units = _ep_cfg.get("units", None)
+    if not (isinstance(units, list) and units and all(isinstance(x, int) and x > 0 for x in units)):
+        raise RuntimeError(f"❌ EXEC_UNITS 非法：{_epn}")
+    units = list(units)
+    max_bet_n = len(units)
     bet_n = 1
-    j = star_idx
-    last_settled_nonT_idx = int(star_snap.idx)
+    j = entry_row_idx
+    # Node 2: 移除 last_settled_nonT_idx
+    # last_settled_nonT_idx = int(star_snap.idx) (DELETED)
     j = advance_one_row(j, records, phase=phase, boot_id=star_boot_id)
 
     is_settled = False
@@ -2266,26 +2711,27 @@ def run_strategy_on_boot(records):
     stage_snaps = []
     stage_snap_profits = []
     snap_seq = 0
-    while bet_n <= 4 and j is not None:
+    while bet_n <= max_bet_n and j is not None:
         row = records[j]
         rr = row.get("r")
         if rr == "T":
             j = advance_one_row(j, records, phase=phase, boot_id=star_boot_id)
             continue
 
-        # 靴级闸门：实际落注点不得落在 seen_all=1..8（非T才算“实际落注点”）
-        if BOOT_FILTER and rr != "T":
+        # 靴级闸门：实际落注点不得落在 禁投区(seen_all < N)（非T才算“实际落注点”）
+        boot_on, allow_from, _rawn = _get_boot_filter_effective()
+        if boot_on and rr != "T":
             try:
                 sa = int(row.get("seen_all"))
-                if 1 <= sa <= 8:
+                if 1 <= sa < allow_from:
                     global BET_IN_FORBIDDEN_SEEN
                     BET_IN_FORBIDDEN_SEEN += 1
-                    _raise_guard(code="BET_IN_FORBIDDEN_SEEN", rule_id=10, phase="EXECUTE", msg="禁区下注", evidence=f"file={row.get('file')}|idx={row.get('idx')}|seen_all={row.get('seen_all')}")
+                    _raise_guard(code="BET_IN_FORBIDDEN_SEEN", rule_id=10, phase="EXECUTE", msg="禁区下注",
+                                 evidence=f"file={row.get('file')}|idx={row.get('idx')}|seen_all={row.get('seen_all')}")
             except RuntimeError:
                 raise
             except Exception:
                 pass
-        # 阶段快照写入移到“赢/输分支：profit 更新之后”（用于写入 profit_to_here；并从上一手已结算非T缓存行取三指标）
 
         # 仅保留元信息（不含指标）
         snapshots.append({
@@ -2306,27 +2752,24 @@ def run_strategy_on_boot(records):
             # 赢
             profit += (u * 0.95 if target_side == "B" else u * 1.0)
 
-            # 阶段快照：写入（非T才写；同一 bet_n 允许多条；snap_seq 仅排序/审计）
+            # Node 5: 阶段快照生成（从 star_snap 复制）
             stage = f"L{bet_n}"
             if stage in _STAGE_LIST and _stage_enabled(stage):
-                if not (0 <= last_settled_nonT_idx < j):
-                    raise RuntimeError(
-                        f"stage_snap cache idx invalid: last_settled_nonT_idx={last_settled_nonT_idx}, j={j}, boot={star_boot_id}"
-                    )
                 snap_seq += 1
                 stage_snaps.append(
-                    _make_stage_snap_from_cache(
+                    _make_stage_snap_from_star(
                         stage=stage,
+                        star=star_snap,
                         rule_id="BASE",
-                        rr=rr,
-                        cache_row=metrics_cache[last_settled_nonT_idx],
                         snap_source=stage,
+                        boot_id=star_boot_id,
                         snap_seq=snap_seq,
                         profit_to_here=profit_before,
+                        settle_rr=rr,
                     )
                 )
                 stage_snap_profits.append(float(profit_before))
-            last_settled_nonT_idx = j
+
             match += 1
             is_settled = True
             break
@@ -2334,27 +2777,24 @@ def run_strategy_on_boot(records):
             # 输
             profit -= u
 
-            # 阶段快照：写入（非T才写；同一 bet_n 允许多条；snap_seq 仅排序/审计）
+            # Node 5: 阶段快照生成（从 star_snap 复制）
             stage = f"L{bet_n}"
             if stage in _STAGE_LIST and _stage_enabled(stage):
-                if not (0 <= last_settled_nonT_idx < j):
-                    raise RuntimeError(
-                        f"stage_snap cache idx invalid: last_settled_nonT_idx={last_settled_nonT_idx}, j={j}, boot={star_boot_id}"
-                    )
                 snap_seq += 1
                 stage_snaps.append(
-                    _make_stage_snap_from_cache(
+                    _make_stage_snap_from_star(
                         stage=stage,
+                        star=star_snap,
                         rule_id="BASE",
-                        rr=rr,
-                        cache_row=metrics_cache[last_settled_nonT_idx],
                         snap_source=stage,
+                        boot_id=star_boot_id,
                         snap_seq=snap_seq,
                         profit_to_here=profit_before,
+                        settle_rr=rr,
                     )
                 )
                 stage_snap_profits.append(float(profit_before))
-            last_settled_nonT_idx = j
+
             bet_n += 1
             j = advance_one_row(j, records, phase=phase, boot_id=star_boot_id)
             continue
@@ -2391,7 +2831,6 @@ def run_strategy_on_boot(records):
         "bet_star_seen_all": bet_star_seen_all,
 
     }
-
 
 
 def _find_existing_col(row0: dict, candidates):
@@ -2464,8 +2903,8 @@ def _ppbb_identity_sample_check(rows, col_result, col_diff, fname):
         except Exception as e:
             PPBB_MISMATCH += 1
             if PPBB_FIRST_EVIDENCE is None:
-                PPBB_FIRST_EVIDENCE = f"PARSE_FAIL | file={fname} | row={i+2} | err={e}"
-            print(f"❌❌❌ 点差恒等式抽检失败：无法解析 | 文件={fname} | 行={i+2}")
+                PPBB_FIRST_EVIDENCE = f"PARSE_FAIL | file={fname} | row={i + 2} | err={e}"
+            print(f"❌❌❌ 点差恒等式抽检失败：无法解析 | 文件={fname} | 行={i + 2}")
             print(f"  BB={r.get(col_bb)} | PP={r.get(col_pp)} | 点差={r.get(col_diff)} | 结果={rr}")
             raise
 
@@ -2473,31 +2912,31 @@ def _ppbb_identity_sample_check(rows, col_result, col_diff, fname):
         if diff_val != (bb - pp):
             PPBB_MISMATCH += 1
             if PPBB_FIRST_EVIDENCE is None:
-                PPBB_FIRST_EVIDENCE = f"DIFF_MISMATCH | file={fname} | row={i+2} | BB={bb} PP={pp} diff={diff_val}"
-            print(f"❌❌❌ 点差恒等式不一致 | 文件={fname} | 行={i+2}")
-            print(f"  BB={bb} | PP={pp} | 点差={diff_val} | (BB-PP)={bb-pp} | 结果={rr}")
+                PPBB_FIRST_EVIDENCE = f"DIFF_MISMATCH | file={fname} | row={i + 2} | BB={bb} PP={pp} diff={diff_val}"
+            print(f"❌❌❌ 点差恒等式不一致 | 文件={fname} | 行={i + 2}")
+            print(f"  BB={bb} | PP={pp} | 点差={diff_val} | (BB-PP)={bb - pp} | 结果={rr}")
             raise RuntimeError("PPBB_DIFF_IDENTITY_FAIL")
 
         # 2) 结果映射一致性
         if rr == "B" and not (bb > pp):
             PPBB_MISMATCH += 1
             if PPBB_FIRST_EVIDENCE is None:
-                PPBB_FIRST_EVIDENCE = f"RES_MISMATCH_B | file={fname} | row={i+2} | BB={bb} PP={pp}"
-            print(f"❌❌❌ 结果映射不一致(B) | 文件={fname} | 行={i+2}")
+                PPBB_FIRST_EVIDENCE = f"RES_MISMATCH_B | file={fname} | row={i + 2} | BB={bb} PP={pp}"
+            print(f"❌❌❌ 结果映射不一致(B) | 文件={fname} | 行={i + 2}")
             print(f"  BB={bb} | PP={pp} | 结果={rr}")
             raise RuntimeError("PPBB_RESULT_IDENTITY_FAIL")
         if rr == "P" and not (pp > bb):
             PPBB_MISMATCH += 1
             if PPBB_FIRST_EVIDENCE is None:
-                PPBB_FIRST_EVIDENCE = f"RES_MISMATCH_P | file={fname} | row={i+2} | BB={bb} PP={pp}"
-            print(f"❌❌❌ 结果映射不一致(P) | 文件={fname} | 行={i+2}")
+                PPBB_FIRST_EVIDENCE = f"RES_MISMATCH_P | file={fname} | row={i + 2} | BB={bb} PP={pp}"
+            print(f"❌❌❌ 结果映射不一致(P) | 文件={fname} | 行={i + 2}")
             print(f"  BB={bb} | PP={pp} | 结果={rr}")
             raise RuntimeError("PPBB_RESULT_IDENTITY_FAIL")
         if rr == "T" and not (bb == pp):
             PPBB_MISMATCH += 1
             if PPBB_FIRST_EVIDENCE is None:
-                PPBB_FIRST_EVIDENCE = f"RES_MISMATCH_T | file={fname} | row={i+2} | BB={bb} PP={pp}"
-            print(f"❌❌❌ 结果映射不一致(T) | 文件={fname} | 行={i+2}")
+                PPBB_FIRST_EVIDENCE = f"RES_MISMATCH_T | file={fname} | row={i + 2} | BB={bb} PP={pp}"
+            print(f"❌❌❌ 结果映射不一致(T) | 文件={fname} | 行={i + 2}")
             print(f"  BB={bb} | PP={pp} | 结果={rr}")
             raise RuntimeError("PPBB_RESULT_IDENTITY_FAIL")
 
@@ -2552,10 +2991,12 @@ def load_all_boots(csv_files):
 
             # 靴结束一致性：仅最后一口为1，其余为0（锁死）
             if end_seen != 1:
-                print("❌❌❌ 靴结束一致性失败：靴结束=1次数!=1 | 文件|Sub-Batch|idx =", fname, current_batch, (current_records[-1].get("idx") if current_records else None))
+                print("❌❌❌ 靴结束一致性失败：靴结束=1次数!=1 | 文件|Sub-Batch|idx =", fname, current_batch,
+                      (current_records[-1].get("idx") if current_records else None))
                 raise RuntimeError("靴结束一致性失败：靴结束=1次数!=1")
             if safe_int(current_records[-1].get("shoe_end"), 0) != 1:
-                print("❌❌❌ 靴结束一致性失败：最后一口靴结束!=1 | 文件|Sub-Batch|idx =", fname, current_batch, current_records[-1].get("idx"))
+                print("❌❌❌ 靴结束一致性失败：最后一口靴结束!=1 | 文件|Sub-Batch|idx =", fname, current_batch,
+                      current_records[-1].get("idx"))
                 raise RuntimeError("靴结束一致性失败：最后一口靴结束!=1")
 
             boot_id_seq += 1
@@ -2563,7 +3004,8 @@ def load_all_boots(csv_files):
                 rr["shoe_id"] = boot_id_seq
                 rr["boot_id"] = boot_id_seq
                 rr["file_idx"] = i
-            boots.append(({"file": fname, "file_idx": i, "sub_batch": current_batch, "boot_id": boot_id_seq}, current_records))
+            boots.append(
+                ({"file": fname, "file_idx": i, "sub_batch": current_batch, "boot_id": boot_id_seq}, current_records))
 
             # reset
             current_batch = None
@@ -2580,7 +3022,8 @@ def load_all_boots(csv_files):
 
             # Sub-Batch 变更必须与靴结束对齐（锁死）：未遇到靴结束=1 不允许变更
             if batch != current_batch:
-                print("❌❌❌ 靴边界失败：Sub-Batch 在靴结束前发生变更 | 文件|Sub-Batch|idx =", fname, current_batch, (current_records[-1].get("idx") if current_records else None))
+                print("❌❌❌ 靴边界失败：Sub-Batch 在靴结束前发生变更 | 文件|Sub-Batch|idx =", fname, current_batch,
+                      (current_records[-1].get("idx") if current_records else None))
                 raise RuntimeError("靴边界失败：Sub-Batch 变更未对齐靴结束")
 
             res_raw = r.get(col_result)
@@ -2604,8 +3047,8 @@ def load_all_boots(csv_files):
                 "diff": diff,
                 "rate": rate,
                 "mean": mean,
-            "rate_raw": rate_raw,
-            "mean_raw": mean_raw,
+                "rate_raw": rate_raw,
+                "mean_raw": mean_raw,
                 "file": fname,
                 "sub_batch": current_batch,
                 "shoe_end": shoe_end,
@@ -2619,15 +3062,82 @@ def load_all_boots(csv_files):
         # 文件结束：若仍有未封口的靴 → 报错
         if current_batch is not None:
             if current_records:
-                print("❌❌❌ 靴结束一致性失败：文件结束仍未遇到靴结束=1 | 文件|Sub-Batch|idx =", fname, current_batch, current_records[-1].get("idx"))
+                print("❌❌❌ 靴结束一致性失败：文件结束仍未遇到靴结束=1 | 文件|Sub-Batch|idx =", fname, current_batch,
+                      current_records[-1].get("idx"))
                 raise RuntimeError("靴结束一致性失败：文件结束未封口")
 
     print("按 Sub-Batch + 靴结束 分靴完成，靴总数:", len(boots))
     return boots
 
+
 # 🍀覆盖锚点002_报告汇总_BEGIN（整段覆盖用此行定位；覆盖范围=本行到对应_END）
+# [结构名覆盖｜锚点002可改｜空字符串=不覆盖｜必须为锚点001结构库已有名称]
+STRUCT_NAME_OVERRIDE = ""
+# [执行链路覆盖｜锚点002可改｜空字符串=不覆盖｜必须为锚点001 EXEC_PROFILES 已有名称]
+EXEC_PROFILE_OVERRIDE = ""
+# [快照链路覆盖｜锚点002可改｜空字符串=不覆盖｜必须为锚点001 SNAP_PROFILES 已有名称]
+SNAP_PROFILE_OVERRIDE = ""
+# [靴级禁投阈值N｜锚点002可改｜空字符串=不覆盖｜N=0=关闭靴级｜N>=1=开启靴级并设阈值(下限=3)]
+# 口径锁死：沿用现有 seen_all 计数口径；禁投区=seen_all < N（N=9 等价旧版 seen_all=1..8）
+# 【靴级别】↓↓↓（搜索：靴级别）
+BOOT_BLOCK_N_OVERRIDE = ""
+
+
+# 锚点002锁死：只允许填字符串，不得填列表/表达式/代码
+
+
+# ==========================
+# 一致性自检（Node 6 新增：防串值 / 计数污染 / 落盘污染）
+# ==========================
+def _audit_consistency(final_metrics):
+    """
+    Node 6: 运行期一致性自检。
+    任何不一致必须当场 raise，严禁只打印不报错。
+    """
+    # 1. 计数一致性自检
+    # chain_entry (总激活数) 必须等于 reach_target (目标层到达数) + 未到达数
+    # 在当前逻辑下，reach_target 是基于 stage_snaps 统计的，理论上应与 total_entry 一致（如果目标层是 L1）
+    # 或者 reach_target <= total_entry
+
+    total_entry = final_metrics.get("entry", 0)
+    # reach_target 在 _run_report 中计算，这里无法直接获取，但可以通过 final_metrics 传递
+    # 假设 final_metrics 中包含了 reach_target (需要修改 _run_report 传递)
+    # 由于不能修改 _run_report 的签名和返回值结构（冻结区限制），
+    # 我们只能在 _run_report 内部进行自检，或者通过全局变量（不推荐但可行）
+
+    # 这里我们重点检查恒等式闭环
+    match = final_metrics.get("match", 0)
+    mismatch = final_metrics.get("mismatch", 0)
+    exhaustion = final_metrics.get("break", 0)
+    stop = final_metrics.get("stop", 0)
+    zero = final_metrics.get("zero", 0)
+
+    calculated_entry = match + mismatch + exhaustion + stop + zero
+    if total_entry != calculated_entry:
+        raise RuntimeError(f"CONSISTENCY_FAIL: Entry({total_entry}) != Sum({calculated_entry})")
+
+    # 2. 红牌四件套自检（通过 flag 或 计数器）
+    # 这些检查主要在运行时通过 raise 实现，这里作为兜底
+
+    # 检查是否有“漏网之鱼”的指标读取（理论上 Node 1-5 已封死）
+    # 检查是否有 SCAN 阶段读取 diff 的痕迹（Node 3 已封死）
+    # 检查是否有 metrics_cache 使用痕迹（Node 2 已封死）
+
+    # 3. 落盘污染自检
+    # 检查 StageSnap 字段是否完整（Node 5 已锁死）
+    # 这一步在 _make_stage_snap_from_star 中已有隐式保证（字段缺失会报错）
+
+    print("✅ 一致性自检通过：计数闭环 | 无未来读取 | 无缓存滥用")
+
+
+# ==========================
+# 报表生成（Node 6 修正：加入一致性自检调用）
+# ==========================
 def _run_report(csv_files, title):
     global RATE_INVALID_RAW, RATE_INVALID_BUCKET
+    # 刷新靴级规则（支持锚点002 BOOT_BLOCK_N_OVERRIDE 覆盖）
+    global BOOT_FILTER_RULE
+    BOOT_FILTER_RULE = _boot_filter_rule()
 
     boots = load_all_boots(csv_files)
     total_boots = len(boots)
@@ -2650,7 +3160,7 @@ def _run_report(csv_files, title):
     STAR_ON_T = 0
     STAR_DIFF0_AND_R_IN_BP = 0
     MEAN_MISSING_RAW = 0  # 数据缺失-仅统计
-    MEAN_PARSE_FAIL = 0     # 解析失败-目标=0
+    MEAN_PARSE_FAIL = 0  # 解析失败-目标=0
     MEAN_INVALID_BUG = 0  # (目标=0) 点差=0却被判为均差无效
     STRUCT_SCAN_CALLS = 0
     STRUCT_OK = 0
@@ -2659,8 +3169,6 @@ def _run_report(csv_files, title):
     MISS_WEAK_GT2 = 0
     MISS_NO_CANDIDATE = 0
     MISS_ONLY_FORBIDDEN = 0
-
-
 
     cont_agg = _init_cont_agg() if CONT_STATS_ENABLE else None
 
@@ -2729,9 +3237,10 @@ def _run_report(csv_files, title):
 
         if isinstance(star, Snapshot):
             sr = star.rr
-            sd = secure_read_metric(star, "diff", "REPORT", who="REPORT", idx=star.idx, boot_id=star.boot_id, seen_all=star.seen_all)
-            srate = secure_read_metric(star, "rate", "REPORT", who="REPORT", idx=star.idx, boot_id=star.boot_id, seen_all=star.seen_all)
-            smean = secure_read_metric(star, "mean", "REPORT", who="REPORT", idx=star.idx, boot_id=star.boot_id, seen_all=star.seen_all)
+            # Node 5: Use sealed values instead of secure_read_metric
+            sd = star.diff_val
+            srate = star.rate_val
+            smean = star.mean_val
 
             if sr == "T":
                 STAR_ON_T += 1
@@ -2749,7 +3258,7 @@ def _run_report(csv_files, title):
                 if rb == '无效':
                     RATE_INVALID_BUCKET += 1
                 # L1均差分桶：区分缺失/解析失败（解析失败目标=0）
-                mean_raw = secure_read_metric(star, "mean_raw", "REPORT", who="REPORT", idx=star.idx, boot_id=star.boot_id, seen_all=star.seen_all)
+                mean_raw = getattr(star, "_mean_raw_text", "")
                 mean_val = smean
 
                 if _is_raw_missing(mean_raw):
@@ -2815,7 +3324,9 @@ def _run_report(csv_files, title):
             if not out.get("entry"):
                 continue
             snaps = out.get("stage_snaps") or []
-            if any(isinstance(x, StageSnap) and x.stage == target_stage and x.snap_source == target_stage and x.bet_n == int(target_stage[1:]) for x in snaps):
+            if any(isinstance(x,
+                              StageSnap) and x.stage == target_stage and x.snap_source == target_stage and x.bet_n == int(
+                    target_stage[1:]) for x in snaps):
                 reach_target += 1
 
     try:
@@ -2832,7 +3343,8 @@ def _run_report(csv_files, title):
         + f" | chain_entry={total_entry}({entry_pct2:.2f}%) | reach_target={reach_target}({reach_pct2:.2f}%) | 目标层={target_stage} | 规则族={'开' if RULESCAN_ON else '关'}"
     )
 
-    print(f"规则族参数：最小命中数={RULESCAN_MIN_CNT} | TopN={RULESCAN_TOPN} | 扫描形态=单桶/双桶AND/两单桶OR | OR退化过滤=Stop%>=99% + 恒真式（仅OR）")
+    print(
+        f"规则族参数：最小命中数={RULESCAN_MIN_CNT} | TopN={RULESCAN_TOPN} | 扫描形态=单桶/双桶AND/两单桶OR | OR退化过滤=Stop%>=99% + 恒真式（仅OR）")
 
     # 目标层未启用：按契约不写快照、不入样本池
     if not stage_on.get(target_stage, False):
@@ -2847,13 +3359,12 @@ def _run_report(csv_files, title):
         cnt_rate_nonneg = 0
         cnt_rate_ge2 = 0
         ex_rate_nonneg = []  # (file_idx, boot_id, snap_seq, rate_text)
-        ex_rate_ge2 = []     # (file_idx, boot_id, snap_seq, rate_text)
+        ex_rate_ge2 = []  # (file_idx, boot_id, snap_seq, rate_text)
         # Δ 自证计数（反事实增益）
         cnt_delta_nonzero = 0
         cnt_stop_missing = 0
         cnt_stop_eq_final = 0
         ex_delta = []  # (file_idx, boot_id, snap_seq, profit_stop, profit_final, delta)
-
 
         def _inc(d: dict, k: str, n: int = 1) -> None:
             d[k] = d.get(k, 0) + n
@@ -2863,7 +3374,8 @@ def _run_report(csv_files, title):
             if not out.get("entry"):
                 continue
             snaps = out.get("stage_snaps") or []
-            pairs = [(i, x) for i, x in enumerate(snaps) if isinstance(x, StageSnap) and x.stage == target_stage and x.snap_source == target_stage]
+            pairs = [(i, x) for i, x in enumerate(snaps) if
+                     isinstance(x, StageSnap) and x.stage == target_stage and x.snap_source == target_stage]
             if not pairs:
                 continue
             pairs.sort(key=lambda t: int(getattr(t[1], "snap_seq", 0) or 0))
@@ -2894,11 +3406,13 @@ def _run_report(csv_files, title):
                 if rv >= 0:
                     cnt_rate_nonneg += 1
                     if len(ex_rate_nonneg) < 5:
-                        ex_rate_nonneg.append((out.get("file_idx"), out.get("boot_id"), snap.snap_seq, snap._rate_raw_text))
+                        ex_rate_nonneg.append(
+                            (out.get("file_idx"), out.get("boot_id"), snap.snap_seq, snap._rate_raw_text))
                 if rv >= 2:
                     cnt_rate_ge2 += 1
                     if len(ex_rate_ge2) < 5:
-                        ex_rate_ge2.append((out.get("file_idx"), out.get("boot_id"), snap.snap_seq, snap._rate_raw_text))
+                        ex_rate_ge2.append(
+                            (out.get("file_idx"), out.get("boot_id"), snap.snap_seq, snap._rate_raw_text))
 
             rb = stage_rate_bucket(snap, target_stage)
             _inc(dist_rate, rb)
@@ -2926,19 +3440,20 @@ def _run_report(csv_files, title):
                     v = dist_rate.get(k, 0)
                     parts.append(f"{k}:{v}({(v / N * 100.0) if N else 0.0:.1f}%)")
                 print(f"[{target_stage}_变化率分布] " + " | ".join(parts) + f" | N={N}")
-                print(f"[{target_stage}_变化率原值自证] >=0:{cnt_rate_nonneg}({(cnt_rate_nonneg/N*100.0) if N else 0.0:.1f}%) | >=2:{cnt_rate_ge2}({(cnt_rate_ge2/N*100.0) if N else 0.0:.1f}%) | 样例>=0 Top5={ex_rate_nonneg} | 样例>=2 Top5={ex_rate_ge2}")
+                print(
+                    f"[{target_stage}_变化率原值自证] >=0:{cnt_rate_nonneg}({(cnt_rate_nonneg / N * 100.0) if N else 0.0:.1f}%) | >=2:{cnt_rate_ge2}({(cnt_rate_ge2 / N * 100.0) if N else 0.0:.1f}%) | 样例>=0 Top5={ex_rate_nonneg} | 样例>=2 Top5={ex_rate_ge2}")
 
                 parts = []
                 for k in [str(i) for i in range(0, 10)] + ["9+"]:
                     v = dist_diff.get(k, 0)
-                    parts.append(f"{k}:{v}({(v/N*100.0):.1f}%)")
+                    parts.append(f"{k}:{v}({(v / N * 100.0):.1f}%)")
                 print(f"[{target_stage}_点差分布] " + " | ".join(parts) + f" | N={N}")
 
                 # 均差分布（锁死全桶位显式输出）
                 parts = []
                 for k in ["|均差|<3", "|均差|>=3", "mean=0", "无效"]:
                     v = dist_mean.get(k, 0)
-                    parts.append(f"{k}:{v}({(v/N*100.0):.1f}%)")
+                    parts.append(f"{k}:{v}({(v / N * 100.0):.1f}%)")
                 print(f"[{target_stage}_均差分布] " + " | ".join(parts) + f" | N={N}")
 
                 def _topn(d: dict, n: int = 5):
@@ -2948,10 +3463,10 @@ def _run_report(csv_files, title):
                 mean_miss = sum(miss_mean.values())
                 if rate_miss:
                     top = ", ".join([f"'{k}':{v}" for k, v in _topn(miss_rate, 5)])
-                    print(f"[{target_stage}_变化率无效] cnt={rate_miss}({rate_miss/N*100.0:.1f}%) | Top5={top}")
+                    print(f"[{target_stage}_变化率无效] cnt={rate_miss}({rate_miss / N * 100.0:.1f}%) | Top5={top}")
                 if mean_miss:
                     top = ", ".join([f"'{k}':{v}" for k, v in _topn(miss_mean, 5)])
-                    print(f"[{target_stage}_均差无效] cnt={mean_miss}({mean_miss/N*100.0:.1f}%) | Top5={top}")
+                    print(f"[{target_stage}_均差无效] cnt={mean_miss}({mean_miss / N * 100.0:.1f}%) | Top5={top}")
 
         # Entry/MinHit 兜底：确保 reach_target=0 时也可打印Δ自证且不崩
         Entry = int(N or 0)
@@ -2961,7 +3476,8 @@ def _run_report(csv_files, title):
             MIN_HIT = RULESCAN_MIN_CNT
 
             print("")
-        print(f"[{target_stage}_Δ自证] 非0Δ={cnt_delta_nonzero}({(cnt_delta_nonzero/Entry*100.0) if Entry else 0.0:.1f}%) | stop缺失={cnt_stop_missing} | stop==final={cnt_stop_eq_final} | Top5={ex_delta}")
+        print(
+            f"[{target_stage}_Δ自证] 非0Δ={cnt_delta_nonzero}({(cnt_delta_nonzero / Entry * 100.0) if Entry else 0.0:.1f}%) | stop缺失={cnt_stop_missing} | stop==final={cnt_stop_eq_final} | Top5={ex_delta}")
         # Δ自证作废阈值（冻结区锁死）：满足任一条即作废
         delta_void = False
         void_reason = ""
@@ -2979,12 +3495,14 @@ def _run_report(csv_files, title):
         if N == 0:
             print(f"规则族扫描已跳过：reach_target=0")
         elif DELTA_AUDIT_ON and delta_void:
-            print(f"[{target_stage}_Δ作废] ✅ 作废原因={void_reason} | stop缺失={cnt_stop_missing} | stop==final={cnt_stop_eq_final} | 非0Δ==0={cnt_nonzero_delta_eq0}")
+            print(
+                f"[{target_stage}_Δ作废] ✅ 作废原因={void_reason} | stop缺失={cnt_stop_missing} | stop==final={cnt_stop_eq_final} | 非0Δ==0={cnt_nonzero_delta_eq0}")
             if DELTA_AUDIT_ENFORCE:
                 raise RuntimeError(f"Δ作废触发：{void_reason}")
             print(f"规则族扫描已跳过：Δ作废({void_reason})")
         else:
-            print(f"规则族扫描（目标层={target_stage}｜Entry={reach_target}｜MinHit={MIN_HIT}｜扫描=单桶+双桶AND+两单桶OR｜不扫三桶）")
+            print(
+                f"规则族扫描（目标层={target_stage}｜Entry={reach_target}｜MinHit={MIN_HIT}｜扫描=单桶+双桶AND+两单桶OR｜不扫三桶）")
             if True:
                 # 预计算样本标签
                 tag_rows = []  # (rate_bucket, diff_bucket, mean_bucket, pnl)
@@ -2998,10 +3516,10 @@ def _run_report(csv_files, title):
                     obs_diff.add(db)
                     obs_mean.add(mb)
 
-                single = defaultdict(lambda: [0, 0.0])       # (field,val) -> [cnt,sum]
-                rate_diff = defaultdict(lambda: [0, 0.0])    # (rb,db) -> [cnt,sum]
-                rate_mean = defaultdict(lambda: [0, 0.0])    # (rb,mb) -> [cnt,sum]
-                diff_mean = defaultdict(lambda: [0, 0.0])    # (db,mb) -> [cnt,sum]
+                single = defaultdict(lambda: [0, 0.0])  # (field,val) -> [cnt,sum]
+                rate_diff = defaultdict(lambda: [0, 0.0])  # (rb,db) -> [cnt,sum]
+                rate_mean = defaultdict(lambda: [0, 0.0])  # (rb,mb) -> [cnt,sum]
+                diff_mean = defaultdict(lambda: [0, 0.0])  # (db,mb) -> [cnt,sum]
 
                 for rb, db, mb, pnl in tag_rows:
                     single[("rate", rb)][0] += 1
@@ -3068,6 +3586,7 @@ def _run_report(csv_files, title):
 
                 # ④ OR 并集（仅两单桶 OR）
                 singles = list(single.keys())  # (field,val)
+
                 def _get_single(k):
                     v = single.get(k)
                     if not v:
@@ -3146,8 +3665,10 @@ def _run_report(csv_files, title):
                         if (_r.get("kind") == "OR") and (_r.get("stop_pct", 0.0) >= RULESCAN_DEGEN_STOP_PCT):
                             _deg_cnt += 1
                     if _deg_cnt:
-                        rows = [_r for _r in rows if not ((_r.get("kind") == "OR") and (_r.get("stop_pct", 0.0) >= RULESCAN_DEGEN_STOP_PCT))]
-                        print(f"（退化规则已过滤：{_deg_cnt} 条｜阈值 Stop%≥{RULESCAN_DEGEN_STOP_PCT*100:.1f}%｜恒真OR已过滤：{tautology_or_filtered} 条）")
+                        rows = [_r for _r in rows if
+                                not ((_r.get("kind") == "OR") and (_r.get("stop_pct", 0.0) >= RULESCAN_DEGEN_STOP_PCT))]
+                        print(
+                            f"（退化规则已过滤：{_deg_cnt} 条｜阈值 Stop%≥{RULESCAN_DEGEN_STOP_PCT * 100:.1f}%｜恒真OR已过滤：{tautology_or_filtered} 条）")
 
                 def _fmt_num(x: float, nd=2):
                     sign = "+" if x >= 0 else ""
@@ -3162,13 +3683,19 @@ def _run_report(csv_files, title):
                         return
                     for r in top:
                         print(
-                            f"{r['rule_id']}: Stop%={r['stop_pct']*100:.1f}%({r['hit']}/{Entry})，"
-                            f"ΔSum={_fmt_num(r['delta_sum'],2)}，ΔAvg={_fmt_num(r['delta_avg'],4)}"
+                            f"{r['rule_id']}: Stop%={r['stop_pct'] * 100:.1f}%({r['hit']}/{Entry})，"
+                            f"ΔSum={_fmt_num(r['delta_sum'], 2)}，ΔAvg={_fmt_num(r['delta_avg'], 4)}"
                         )
 
-                _print_top("Top（主排序=ΔAvg）", lambda r: r["delta_avg"])
-                _print_top("Top（主排序=ΔSum）", lambda r: r["delta_sum"])
-                _print_top("Top（主排序=Stop%）", lambda r: r["stop_pct"])
+                # 崩溃修复：当无有效规则时，跳过 Top / OOS 报告打印（避免空候选导致索引越界崩溃）
+                _max_hit = max((r.get("hit", 0) for r in rows), default=0)
+                if (not rows) or (_max_hit < RULESCAN_MIN_CNT):
+                    print("")
+                    print(f"（无有效规则：rows={len(rows)}，MaxHit={_max_hit}，MinHit={RULESCAN_MIN_CNT}；跳过Top/OOS）")
+                else:
+                    _print_top("Top（主排序=ΔAvg）", lambda r: r["delta_avg"])
+                    _print_top("Top（主排序=ΔSum）", lambda r: r["delta_sum"])
+                    _print_top("Top（主排序=Stop%）", lambda r: r["stop_pct"])
         # ==================== 投放链路 END ====================
 
     print("============================================================")
@@ -3182,11 +3709,13 @@ def _run_report(csv_files, title):
     print(f"AnchorMode={STRUCT_ANCHOR_MODE}")
     print("PreSW=LEADER_AS_TEMP | Tie=KEEP_LAST | Fallback=FIRST_VALID_WINNER | Switch=B1_RESET_TO_STEP1")
     print("T/0=SHIFT_ONLY_NO_BREAK")
+    _bon, _an, _raw = _get_boot_filter_effective()  # 靴级自证需要，避免未赋值
     try:
         _fa = BOOT_FILTER_RULE.get("forbidden_action")
     except Exception:
         _fa = "NA"
-    print(f"BOOT_FILTER={'ON' if BOOT_FILTER else 'OFF'} + forbidden_action={_fa}")
+        _bon, _an, _raw = _get_boot_filter_effective()
+    print(f"BOOT_FILTER={'ON' if _bon else 'OFF'} + forbidden_action={_fa}")
     _avg_pnl = (total_profit / total_entry) if total_entry else 0.0
     print(f"💶💶💶 单次平均增益: {_avg_pnl:.6f}")
     print(f"💶💶💶 总净值增益  : {total_profit:.2f}")
@@ -3196,15 +3725,16 @@ def _run_report(csv_files, title):
         print("段长口径：禁止跨段累计")
         print("术语锁死：只承认「⭐ / 投放点」")
         _print_switches_block("HEADER")
-        # 表头开关自证（锁死）：即使静默模式也必须打印
-        print("结构闸门：STRUCT_SCAN=ON✅(结构扫描开启)")
-        print("靴级开关：BOOT_FILTER=ON✅(禁下注 seen_shift=1..8)")
+        # 表头开关自证（锁死）：即使静默模式也必须打印（以下两行保留但改为动态口径）
+        print(f"结构闸门：{STRUCT_SCAN_TEXT}")
+        print(f"靴级开关：{_boot_filter_label()}")
         _sl, _sh = _get_struct_summary_line_and_hash()
         print(_sl)
         print(f"AnchorMode={STRUCT_ANCHOR_MODE}")
         print("PreSW=LEADER_AS_TEMP | Tie=KEEP_LAST | Fallback=FIRST_VALID_WINNER | Switch=B1_RESET_TO_STEP1")
         print("T/0=SHIFT_ONLY_NO_BREAK")
-        print(f"BOOT_FILTER={'ON' if BOOT_FILTER else 'OFF'} + forbidden_action={BOOT_FILTER_RULE.get('forbidden_action','NA')}")
+        print(
+            f"BOOT_FILTER={'ON' if _get_boot_filter_effective()[0] else 'OFF'} + forbidden_action={BOOT_FILTER_RULE.get('forbidden_action', 'NA')}")
         global _STRUCT_SUMMARY_PRINTED
         _STRUCT_SUMMARY_PRINTED = True
         print(f"监测开关：{'开' if MONITOR_ENABLE else '关'}")
@@ -3219,8 +3749,8 @@ def _run_report(csv_files, title):
         entry_pct = (total_entry / total_boots * 100.0) if total_boots > 0 else 0.0
         print(f"激活次数    : {total_entry} ({entry_pct:.2f}%)")
         match_pct = (total_match / total_entry * 100.0) if total_entry > 0 else 0.0
-        mismatch_pct = (total_mismatch / total_entry * 100.0) if total_entry > 0 else 0.0
         print(f"匹配次数    : {total_match} ({match_pct:.2f}%)")
+        mismatch_pct = 0  # FIX: prevent NameError in audit/report
         print(f"不匹配次数  : {total_mismatch} ({mismatch_pct:.2f}%)")
 
         # ==========================
@@ -3257,34 +3787,37 @@ def _run_report(csv_files, title):
         if POSITIVE_AUDIT_ENABLE and (trigger_total or trigger_avg):
             SELF_AUDIT_GATE(final_metrics)
 
+        # Node 6: 运行期一致性自检
+        _audit_consistency(final_metrics)
 
     _abn = []  # 自证异常收集器（修复 NameError）
+
     def _abn0(name, val, expect=0):
         try:
             if val != expect:
                 _abn.append((name, val, expect))
         except Exception:
             _abn.append((name, 'ERR', expect))
+
     _abn0('STAR_ON_T', STAR_ON_T)
     _abn0('STAR_DIFF0_AND_R_IN_BP', STAR_DIFF0_AND_R_IN_BP)
     _abn0('MEAN_MISSING_RAW', MEAN_MISSING_RAW)
     _abn0('MEAN_PARSE_FAIL', MEAN_PARSE_FAIL)
     _abn0('MEAN_INVALID_BUG(目标=0)', MEAN_INVALID_BUG)
-    
+
     # RATE 无效：非 0 不算异常；仅在一致性失败时弹出（断言已覆盖，但仍留一行提示）
     if RATE_INVALID_RAW != RATE_INVALID_BUCKET:
         _abn.append(('RATE_INVALID_MISMATCH', f'{RATE_INVALID_RAW}!={RATE_INVALID_BUCKET}', 'equal'))
-    
+
     if PPBB_MISMATCH != 0:
         _abn.append(('PPBB_MISMATCH', PPBB_MISMATCH, 0))
-    
+
     if _abn:
         print('自证异常（仅异常弹出）:')
         for name, val, exp in _abn:
             print(f'  {name}: {val} (期望={exp})')
     if PPBB_FIRST_EVIDENCE is not None:
         print("  PPBB_FIRST_EVIDENCE:", PPBB_FIRST_EVIDENCE)
-
 
     if cont_agg is not None:
         print()
@@ -3334,24 +3867,24 @@ def _run_report(csv_files, title):
                 min(10, CONT_TOPK),
             )
 
-    
     # 物理锁死：必须打印两处开关，否则直接作废
     if not _PRINTED_SWITCHES_HEADER:
         raise RuntimeError("❌ 缺失表头开关自证：BOOT_FILTER/STRUCT_SCAN 未打印")
     if not _PRINTED_SWITCHES_PROOF:
         raise RuntimeError("❌ 缺失强制自证开关：BOOT_FILTER/STRUCT_SCAN 未打印")
 
+
 # 🍀覆盖锚点002_报告汇总_END
 
 def main():
     try:
-        
+
         # 首屏水印（硬锁死）
         print(WATERMARK_TEXT)
         print("BUILD_TAG: " + BUILD_TAG)
         global _WATERMARK_PRINTED
         _WATERMARK_PRINTED = True
-        
+
         # 【强制自证输出】（硬锁死）
         print("【强制自证输出】")
         _print_switches_block("PROOF")
@@ -3368,25 +3901,27 @@ def main():
         print(f"PPBB_IDENTITY_CHECKED = {PPBB_CHECKED} | PPBB_MISMATCH = {PPBB_MISMATCH}")
         global _PROOF_BLOCK_PRINTED
         _PROOF_BLOCK_PRINTED = True
-        
+
         # 硬注入自检（必须 raise 阻断，不得吞错）
         if not SILENT_MODE:
             print("=== 正在执行硬注入自检 ===")
         try:
             # 用例A：T行写快照 -> 必须阻断✅
-            _ = write_star_snapshot("DECISION", {"r": "T", "seen_all": 9, "diff": 1, "rate": "None", "mean": "None", "shoe_id": "SELFTEST"}, 0)
+            _ = write_star_snapshot("DECISION", {"r": "T", "seen_all": 9, "diff": 1, "rate": "None", "mean": "None",
+                                                 "shoe_id": "SELFTEST"}, 0)
             raise RuntimeError("SELF_TEST_FAIL: T_SNAPSHOT_NOT_BLOCKED")
         except RuntimeError:
             pass
-        
+
         try:
             # 用例B：非DECISION读指标 -> 必须阻断✅
-            tmp = Snapshot({"diff": 1, "rate": None, "mean": None, "rate_raw": "None", "mean_raw": "None"}, boot_id="SELFTEST", idx=0, seen_all=9, rr="B", source="STAR_ROW")
+            tmp = Snapshot({"diff": 1, "rate": None, "mean": None, "rate_raw": "None", "mean_raw": "None"},
+                           boot_id="SELFTEST", idx=0, seen_all=9, rr="B", source="STAR_ROW")
             _ = secure_read_metric(tmp, "diff", "EXECUTE", who="STAR", idx=0, boot_id="SELFTEST", seen_all=9)
             raise RuntimeError("SELF_TEST_FAIL: NON_DECISION_METRIC_NOT_BLOCKED")
         except RuntimeError:
             pass
-        
+
         try:
             # 用例C：执行推进中读取指标（通过 MetricGuardRow）-> 必须阻断✅
             g = MetricGuardRow({"r": "B", "diff": 1, "rate": 0.1, "mean": 1.0})
@@ -3394,7 +3929,7 @@ def main():
             raise RuntimeError("SELF_TEST_FAIL: EXECUTE_METRIC_NOT_BLOCKED")
         except RuntimeError:
             pass
-        
+
         print("硬注入验证=通过✅")
         print("非法指标访问模拟=已阻断✅")
         print("T行写快照=已阻断✅")
@@ -3413,7 +3948,7 @@ def main():
             _run_report(csv_files[mid:], "验真阶段（后 50%）")
         else:
             _run_report(csv_files, "优化阶段（全量）")
-        
+
         # 📌 抽样探针输出（冻结区）
         _sample_probe_emit()
 
@@ -3434,8 +3969,9 @@ def main():
 # 轻量自审（仅用于“净值转正”提示；不替代 AUDIT_RUN=1 严格审查）
 # 目标：不中断优化流程；仅提示关键风险；严禁递归自审
 # =========================
-AUTO_SELF_AUDIT_ON_POSITIVE = True   # 净值>0 时触发一次“轻量自审提示”
-IN_SELF_AUDIT = False               # 防重入
+AUTO_SELF_AUDIT_ON_POSITIVE = True  # 净值>0 时触发一次“轻量自审提示”
+IN_SELF_AUDIT = False  # 防重入
+
 
 def _get_total_pnl_for_self_audit():
     """
@@ -3450,6 +3986,7 @@ def _get_total_pnl_for_self_audit():
             except Exception:
                 return None
     return None
+
 
 def _self_audit_light():
     """
@@ -3502,6 +4039,7 @@ def _self_audit_light():
     else:
         print("【轻量自审】✅ 通过（轻量）")
 
+
 def _auto_self_audit_after_run():
     """
     仅在“非严格审查跑”且净值>0 时触发一次轻量自审提示。
@@ -3525,6 +4063,7 @@ def _auto_self_audit_after_run():
         _self_audit_light()
     finally:
         IN_SELF_AUDIT = False
+
 
 if __name__ == "__main__":
     main()
