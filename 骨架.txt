@@ -69,6 +69,21 @@ B）仅用于 L2/L3/L4 各自注位的【实际投放前快照】
   - 主分布：|diff| = 1..9
   - 纠错计数：|diff|=0 与 9+ 合并计数（不进入 1..9 分布）
 
+《补丁7封版口径（一次性交易锁下｜最终）》
+口位术语锁死：对外仅承认 ♻⭐ / 🎯 / 📌。
+♻⭐：仅用于结构定位，不发生取值/下注。
+🎯：唯一“人类取值/下注口”，仅此处允许读取约定指标并结算净值。
+📌：抽样定位点，📌=🎯，仅用于打印核对（不参与决策）。
+一次性扫描/一次性交易锁死：保持开启；在该锁定条件下，1248 链路不可实现多次🎯结算。
+统计口径封版：因此补丁7最终采用 单笔统计（FIRST_BET_ONLY），并以🎯结算真源为准：
+PNL 真源=🎯结算（BET_SIDE / OUTCOME_SIDE / PNL_BY_OUTCOME），禁止用 match/mismatch 充当输赢。
+TIE 采用独立口径：TIE 不混入净值输赢统计。
+对外自证（锁死）：报表必须出现以下自证行（原样）：
+GATE3_A: can_multi_bet_unit=0 | reason=ONE_TIME_TRADE_LOCKED
+GATE3_B: 1248_chain=UNSUPPORTED_UNDER_ONE_TIME_TRADE
+GATE3_B: fallback=FIRST_BET_ONLY (unit_len fixed to 1)
+SINGLE_BET_IDENTITY: FIRST_BET_COUNT==BET_COUNT==reach_target
+
 【术语锁死（永久锁死｜新版）】
 - 对外讨论与口径只承认两个名词：⭐ / 投放点。
 - ⭐=结构扫描终点（扫描♻结束口｜用于描述结构来源与定位）；不等同取值/下注点。
