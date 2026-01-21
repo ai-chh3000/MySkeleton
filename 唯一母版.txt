@@ -23,7 +23,7 @@ WATERMARK_TEXT = "🚀🚀🚀 🍔🍔🍔 🎰🎰🎰"
 # ------------------------------------------------------------
 SAMPLE_PROBE_ENABLE = 1  # 1=ON, 0=OFF
 SAMPLE_PROBE_K = 3  # 抽样条数
-SAMPLE_PROBE_PREFIX = "📌"
+SAMPLE_PROBE_PREFIX = "🎯"
 SAMPLE_PROBE_RUN_NONCE = int.from_bytes(os.urandom(8), "big")  # 每次运行不同；仅用于抽样排序
 _SAMPLE_PROBE_BEST_BY_FILE = {}  # file -> (score, file, sub_batch, idx)
 _SAMPLE_PROBE_FALLBACK = None  # (base, sub_batch, idx)
@@ -36,20 +36,14 @@ def _sample_probe_u64(s: str) -> int:
 
 
 def _sample_probe_fallback_update(file_name, sub_batch, idx) -> None:
-    """抽样兜底：即使无⭐/无ENTRY，也保证至少有一条📌可定位。"""
-    global _SAMPLE_PROBE_FALLBACK
-    if not SAMPLE_PROBE_ENABLE:
-        return
-    if not file_name:
-        return
-    try:
-        base = os.path.basename(str(file_name))
-        _SAMPLE_PROBE_FALLBACK = (base, sub_batch, idx)
-    except Exception:
-        return
+    """抽样兜底：关闭（只保留🎯下注口定位行；不再输出任何兜底行）。"""
+    return
 
 
 def _sample_probe_update(file_name, sub_batch, idx, boot_id=None) -> None:
+    """冻结区抽样候选更新：每文件只保留 1 条（最小哈希者）。"""
+    if not SAMPLE_PROBE_ENABLE:
+        return
     """冻结区抽样候选更新：每文件只保留 1 条（最小哈希者）。"""
     if not SAMPLE_PROBE_ENABLE:
         return
@@ -74,12 +68,18 @@ def _sample_probe_emit() -> None:
     if not SAMPLE_PROBE_ENABLE:
         return
     if not _SAMPLE_PROBE_BEST_BY_FILE:
-        # 无可抽样候选：仍给 1 行提示（极简）
         print(f"{SAMPLE_PROBE_PREFIX}|NONE🆗")
         return
     items = sorted(_SAMPLE_PROBE_BEST_BY_FILE.values(), key=lambda x: x[0])[:int(SAMPLE_PROBE_K or 0)]
     for _, base, sb, n in items:
-        print(f"{SAMPLE_PROBE_PREFIX}|f={base}|SB={sb}|N={n}🆗")
+        # 只允许输出“肉眼指哪打哪”的唯一坐标：N（=🎯=N_prebet=人类局号/下注口）
+        try:
+            n_out = int(n)
+        except Exception:
+            raise RuntimeError(f"❌ SAMPLE_PROBE_N_NOT_INT: N={n}")
+        if n_out <= 0:
+            raise RuntimeError(f"❌ SAMPLE_PROBE_N_NONPOSITIVE: N={n_out}")
+        print(f"{SAMPLE_PROBE_PREFIX}|f={base}|SB={sb}|N={n_out}🆗")
 
 
 BUILD_TAG = "V30_UPGRADED_fix_bootid_v32_buildtag_fix|TAG20260105-01|BOOT_START_LOCK_SW|DUAL_SEEN|B1_RESET_STEP1|RUNLEN_LOCK_S|R_TRUTH|TEMP_INIT_FIRST|HYST3|DIFF_SIGN_ONLY"
@@ -300,7 +300,7 @@ class ScanGuardRow(dict):
 _METRIC_READ_ARMED = 0
 
 
-def _arm_metric_read():
+def _arm_metric_read(*_a, **_k):
     global _METRIC_READ_ARMED
     _METRIC_READ_ARMED = 1
 
@@ -530,20 +530,24 @@ def secure_read_metric(snap, key, phase, *, who, idx, boot_id, seen_all):
 
 def secure_write_star_snapshot(row, phase, *, seen_all, rr, boot_id, star_idx, star_snapshot_is_none, exh_pair=None):
     """写快照唯一入口（锁死）。
-    Node 1 增强：
-      - 唯一允许 arm 的地方
-      - 一次性读取并封存所有指标
-      - 严格校验 diff (1..9)
-      - 立即 seal & disarm
+    - 🎯最终硬闸门：rr 必须是 B/P
+    - 禁下注区：命中直接阻断
+    - 缺失指标：rate/mean 允许落入“无效/0”以保证封存不缺值（避免 StageSnap 断言）
     """
     if phase != "DECISION":
         raise RuntimeError("STAR_SNAPSHOT_PHASE_NOT_DECISION")
     if not star_snapshot_is_none:
         raise RuntimeError("STAR_SNAPSHOT_DUPLICATE")
-    if rr == "T":
-        raise RuntimeError("STAR_SNAPSHOT_ON_T")
 
-    # seen_all 门禁
+    # Node8｜🎯最终硬闸门（锁死）：rr 必须是 B/P（T 永远不允许落🎯）
+    if rr not in ("B", "P"):
+        f = row.get("file", "NA")
+        sb = row.get("sub_batch", "NA")
+        raise RuntimeError(
+            f"STAR_SNAPSHOT_TGT_R_INVALID: rr={rr} file={f} SB={sb} N={seen_all} star_idx={star_idx} boot_id={boot_id}"
+        )
+
+    # seen_all 门禁（禁下注区必须阻断）
     boot_on, allow_from, _raw = _get_boot_filter_effective()
     min_seen = int(allow_from) if boot_on else 1
     try:
@@ -551,82 +555,120 @@ def secure_write_star_snapshot(row, phase, *, seen_all, rr, boot_id, star_idx, s
     except Exception:
         raise RuntimeError("STAR_SNAPSHOT_SEEN_PARSE_FAIL")
     if sa < min_seen:
-        raise RuntimeError("STAR_SNAPSHOT_SEEN_LT9")
+        raise RuntimeError("BET_IN_FORBIDDEN_SEEN")
 
-    # 1. Arm
     _arm_metric_read()
-
     try:
-        # 2. Create temp snap for reading
         tmp_snap = Snapshot(
-            {"diff": row.get("diff"), "rate": row.get("rate"), "mean": row.get("mean"),
-             "rate_raw": row.get("rate_raw"), "mean_raw": row.get("mean_raw")},
-            boot_id=boot_id, idx=star_idx, seen_all=seen_all, rr=rr, source="STAR_ROW"
+            {
+                "diff": row.get("diff"),
+                "rate": row.get("rate"),
+                "mean": row.get("mean"),
+                "rate_raw": row.get("rate_raw"),
+                "mean_raw": row.get("mean_raw"),
+            },
+            boot_id=boot_id,
+            idx=star_idx,
+            seen_all=seen_all,
+            rr=rr,
+            source="STAR_ROW",
         )
 
-        # 3. Read All Metrics
         d = secure_read_metric(tmp_snap, "diff", phase, who="STAR", idx=star_idx, boot_id=boot_id, seen_all=seen_all)
         r = secure_read_metric(tmp_snap, "rate", phase, who="STAR", idx=star_idx, boot_id=boot_id, seen_all=seen_all)
         m = secure_read_metric(tmp_snap, "mean", phase, who="STAR", idx=star_idx, boot_id=boot_id, seen_all=seen_all)
-        rate_raw_text = secure_read_metric(tmp_snap, "rate_raw", phase, who="STAR", idx=star_idx, boot_id=boot_id,
-                                           seen_all=seen_all)
-        mean_raw_text = secure_read_metric(tmp_snap, "mean_raw", phase, who="STAR", idx=star_idx, boot_id=boot_id,
-                                           seen_all=seen_all)
 
-        # 4. Validate Diff (Strict: 1..9)
+        rate_raw_text = secure_read_metric(
+            tmp_snap, "rate_raw", phase, who="STAR", idx=star_idx, boot_id=boot_id, seen_all=seen_all
+        )
+        mean_raw_text = secure_read_metric(
+            tmp_snap, "mean_raw", phase, who="STAR", idx=star_idx, boot_id=boot_id, seen_all=seen_all
+        )
+
+        # diff 严格：1..9
         try:
             d_int = int(float(d))
         except Exception:
             raise RuntimeError("STAR_SNAPSHOT_DIFF_PARSE_FAIL")
-
         if d_int == 0:
             raise RuntimeError("STAR_SNAPSHOT_DIFF_ZERO")
         if abs(d_int) > 9:
             raise RuntimeError("STAR_SNAPSHOT_DIFF_OVER_9")
 
-        # 5. Calculate Buckets
-        mode, l1b, rb, active = _rate_quartet(exh_pair, r)
-        diff_bucket = _l1_abs_diff_bucket(d_int)
-        mean_bucket, _ = _l1_mean_bucket(d_int, m)
+        # rate 缺失：用 0.0 占位，并强制桶=无效（避免 “无效” 被当 float）
+        force_rate_invalid = 0
+        if r is None:
+            r = 0.0
+            force_rate_invalid = 1
 
-        # 6. Create Final Sealed Snapshot
+        # mean 缺失：用 0.0 占位，并强制 mean_bucket=无效
+        mean_bucket = None
+        if m is None:
+            m = 0.0
+            mean_bucket = "无效"
+
+        mode, l1b, rb, active = _rate_quartet(exh_pair, r)
+        if force_rate_invalid:
+            mode = "无效"
+            l1b = "无效"
+            rb = "无效"
+            active = "无效"
+
+        diff_bucket = _l1_abs_diff_bucket(d_int)
+        if mean_bucket is None:
+            mean_bucket, _ = _l1_mean_bucket(d_int, m)
+
         sealed_values = {
             "diff_val": d_int,
             "rate_val": r,
             "mean_val": m,
             "diff_bucket": diff_bucket,
-            "mean_bucket": mean_bucket
+            "mean_bucket": mean_bucket,
         }
 
         final_snap = Snapshot(
             {"diff": d, "rate": r, "mean": m, "rate_raw": rate_raw_text, "mean_raw": mean_raw_text},
-            boot_id=boot_id, idx=star_idx, seen_all=seen_all, rr=rr, source="STAR_ROW",
-            sealed_values=sealed_values
+            boot_id=boot_id,
+            idx=star_idx,
+            seen_all=seen_all,
+            rr=rr,
+            source="STAR_ROW",
+            sealed_values=sealed_values,
         )
 
         final_snap._bind_rate_fields(
-            exh_pair=exh_pair, rate_mode=mode,
-            rate_bucket_l1=l1b, rate_bucket_r=rb, rate_bucket=active
+            exh_pair=exh_pair,
+            rate_mode=mode,
+            rate_bucket_l1=l1b,
+            rate_bucket_r=rb,
+            rate_bucket=active,
         )
 
         _bind_raw_text_fields(final_snap, rate_raw_text, mean_raw_text)
-
         return final_snap
 
     finally:
-        # 7. Disarm
         _disarm_metric_read()
 
 
 def write_star_snapshot(phase, star_row, star_idx):
-    """兼容入口：内部转发到 secure_write_star_snapshot（禁止其他写法）。"""
+    """唯一入口（锁死）：不管普通/延迟结构，🎯=下注口=取值点都必须写快照。"""
     rr = star_row.get("r")
     seen_all = star_row.get("seen_all")
     boot_id = star_row.get("boot_id", star_row.get("shoe_id"))
+
+    # Node11｜锁死：DECISION 一律写快照；其它阶段一律禁止
+    if phase != "DECISION":
+        raise RuntimeError("STAR_SNAPSHOT_PHASE_NOT_DECISION")
+
     return secure_write_star_snapshot(
-        star_row, phase,
-        seen_all=seen_all, rr=rr, boot_id=boot_id, star_idx=star_idx,
-        star_snapshot_is_none=True
+        star_row,
+        phase,
+        seen_all=seen_all,
+        rr=rr,
+        boot_id=boot_id,
+        star_idx=star_idx,
+        star_snapshot_is_none=True,
     )
 
 
@@ -645,6 +687,12 @@ def _to_row_lite(row):
 
 
 def guard_future_rows(records, start_j):
+    """从 start_j 开始把后续行替换为 RowLite(MetricGuardRow)，从根源去指标。"""
+    for k in range(start_j, len(records)):
+        r = records[k]
+        if isinstance(r, MetricGuardRow):
+            continue
+        records[k] = _to_row_lite(r)
     """从 start_j 开始把后续行替换为 RowLite(MetricGuardRow)，从根源去指标。"""
     for k in range(start_j, len(records)):
         r = records[k]
@@ -837,76 +885,88 @@ STRUCTURE_SLOT_LINE_RANGE = None  # (begin_line, end_line)
 # ------------------------- 结构库（内部维护）-------------------------
 STRUCT_VARIANTS = {
     # ===================== 三连结构 =====================
-    # W1-2 → S=3 ⭐｜投放方向：S（跟随⭐）
+    # Y1-2 → X=3 ⭐｜投放方向：X（跟随⭐）
     "三连结构": """step	side	min_len	max_len	mark
-1	W	1	2
-2	S	3	3	⭐
+1	Y	1	2
+2	X	3	3	⭐
 """,
 
     # ===================== Q1 =====================
-    # S≥3 → W1-2 → S⭐｜投放方向：S（跟随⭐）
+    # X≥3 → Y1-2 → X⭐｜投放方向：X（跟随⭐）
     "Q1": """step	side	min_len	max_len	mark
-1	S	3	999
-2	W	1	2
-3	S	1	999	⭐
+1	X	3	999
+2	Y	1	2
+3	X	1	999	⭐
 """,
 
     # ===================== Q1-V2 =====================
-    # W1-2 → S≥3 → W1-2 → S⭐｜投放方向：S（跟随⭐）
+    # Y1-2 → X≥3 → Y1-2 → X⭐｜投放方向：X（跟随⭐）
     "Q1-V2": """step	side	min_len	max_len	mark
-1	W	1	2
-2	S	3	999
-3	W	1	2
-4	S	1	999	⭐
+1	Y	1	2
+2	X	3	999
+3	Y	1	2
+4	X	1	999	⭐
 """,
 
-    # ===================== Q1-S4版 =====================
-    # S≥4 → W1-2 → S⭐｜投放方向：S（跟随⭐）
-    "Q1-S4版": """step	side	min_len	max_len	mark
-1	S	4	999
-2	W	1	2
-3	S	1	999	⭐
+    # ===================== Q1-X4版 =====================
+    # X≥4 → Y1-2 → X⭐｜投放方向：X（跟随⭐）
+    "Q1-X4版": """step	side	min_len	max_len	mark
+1	X	4	999
+2	Y	1	2
+3	X	1	999	⭐
 """,
 
-    # ===================== 延迟-Q1-S4版（B方案｜👀无规则，🎯待触发） =====================
-    # 基底：S≥4 → W1-2 → S⭐｜延迟：从👀后逐口等🎯命中（B方案不做W/S过滤）
-    # 👀条件：NONE（可调）
-    # 🎯条件：前小（可调）
-    # 投放方向：S（触发后投放点=下一口非T生效；T=跳过）
-    "延迟-Q1-S4版": """step	side	min_len	max_len	mark
-1	S	4	999
-2	W	1	2
-3	S	1	999	👀⭐
-""",
+    # ===================== 延迟-Q1-X4_同点（👀=🎯｜极值当口） =====================
+    # 基底：X≥4 → Y1-2 → X⭐｜延迟：从👀后立刻视为🎯（同点型）
+    # 👀条件：Rate=极值（可调）
+    # 🎯条件：同👀（固定同点）
+    # 投放方向：S（🎯当口；结算口=🎯后一口起首个非T；T跳过）
+    "延迟-Q1-X4_同点": """step	side	min_len	max_len	mark
+    1	X	4	999
+    2	Y	1	2
+    3	X	1	999	👀⭐
+    """,
+
+    # ===================== 延迟-Q1-X4_极值后（先👀极值→再等🎯） =====================
+    # 基底：X≥4 → Y1-2 → X⭐｜延迟：先命中👀(Rate=极值)，再从👀后逐口等🎯命中
+    # 👀条件：Rate=极值（可调）
+    # 🎯条件：TBD（后续由你/探针在002里枚举或回填）
+    # 投放方向：S（🎯当口；结算口=🎯后一口起首个非T；T跳过）
+    "延迟-Q1-X4_极值后": """step	side	min_len	max_len	mark
+    1	X	4	999
+    2	Y	1	2
+    3	X	1	999	👀⭐
+    """,
+
     # ===================== R1 =====================
-    # S≥4 → W1-2 → S1-2 → ⭐W1｜投放方向：S（跟随⭐）
+    # X≥4 → Y1-2 → X1-2 → ⭐Y1｜投放方向：X（跟随⭐）
     "R1": """step	side	min_len	max_len	mark
-1	S	4	999
-2	W	1	2
-3	S	1	2
-4	W	1	1	⭐
+1	X	4	999
+2	Y	1	2
+3	X	1	2
+4	Y	1	1	⭐
 """,
 
     # ===================== 31打反 =====================
-    # W1-2 → S=3 → W1⭐｜投放方向：S（结构31打反）
+    # Y1-2 → X=3 → Y1⭐｜投放方向：X（结构31打反）
     "31打反": """step	side	min_len	max_len	mark
-1	W	1	2
-2	S	3	3
-3	W	1	1	⭐
+1	Y	1	2
+2	X	3	3
+3	Y	1	1	⭐
 """,
 
     # ===================== 单边41 =====================
-    # W1-2 → S=4 → W1=1 → S=1⭐｜投放方向：S（跟随⭐）
+    # Y1-2 → X=4 → Y1=1 → X=1⭐｜投放方向：X（跟随⭐）
     "单边41": """step	side	min_len	max_len	mark
-1	W	1	2
-2	S	4	4
-3	W	1	1
-4	S	1	1	⭐
+1	Y	1	2
+2	X	4	4
+3	Y	1	1
+4	X	1	1	⭐
 """,
 }
 
 # 当前启用结构（切结构只改这一行）
-ACTIVE_STRUCT_NAME = "Q1-S4版"
+ACTIVE_STRUCT_NAME = "Q1-X4版"
 
 # 运行时生效结构表（解析器/扫描器只读这个）
 if ACTIVE_STRUCT_NAME not in STRUCT_VARIANTS:
@@ -1094,7 +1154,7 @@ def _cfg_parse_struct_table(text: str):
 
     # 字段校验
     for r in rows:
-        if r["side"] not in ("S", "W", "B", "P"):
+        if r["side"] not in ("S", "W", "X", "Y", "B", "P"):
             raise RuntimeError("STRUCT_CONFIG_INVALID: bad_side")
         if r["min_len"] <= 0 or r["max_len"] <= 0:
             raise RuntimeError("STRUCT_CONFIG_INVALID: minmax_must_be_positive")
@@ -1241,10 +1301,37 @@ def scan_by_config_v2(records, rows, anchor_mode, sw_rule):
     run_side = None
     run_len = 0
 
+    # Node3：X/Y 绝对锁（D1｜起点A｜T跳过不计数不打断）
+    X_LOCKED_ABS = None  # "B" or "P"
+    X_run_side = None
+    X_run_len = 0
+
     rule = BOOT_FILTER_RULE
-    boot_on = bool(rule.get("boot_on", bool(BOOT_FILTER)))
+
+    def _as_int_flag(v, default=0):
+        try:
+            if v is None:
+                return int(default)
+            s = str(v).strip()
+            if s == "":
+                return int(default)
+            # 兼容 "0" / "1" / 0 / 1 / "0.0"
+            return int(float(s))
+        except Exception:
+            return int(default)
+
+    # boot_on：允许壳把 0/1 写成字符串也不误判
+    boot_on = bool(rule.get("boot_on", bool(_as_int_flag(globals().get("BOOT_FILTER", 0), 0))))
+
     forbidden_lo, forbidden_hi = rule["forbidden_lo"], rule["forbidden_hi"]
-    forbidden_action = rule.get("forbidden_action", "SKIP_STAR")
+
+    # forbidden_action：若 rule 未显式给，则由 BOOT_FILTER_FORBIDDEN_ABORT(0/1) 决定
+    _fa = rule.get("forbidden_action", None)
+    if _fa is None:
+        _abort = _as_int_flag(globals().get("BOOT_FILTER_FORBIDDEN_ABORT", 0), 0)
+        forbidden_action = "ABORT_BOOT" if _abort == 1 else "SKIP_STAR"
+    else:
+        forbidden_action = str(_fa).strip().upper()
 
     def _opp(bp):
         return "P" if bp == "B" else ("B" if bp == "P" else None)
@@ -1253,17 +1340,23 @@ def scan_by_config_v2(records, rows, anchor_mode, sw_rule):
         # 绝对方
         if side in ("B", "P"):
             return side
-        # 强弱方
-        if side in ("S", "W"):
-            if strong_abs is not None:
-                return strong_abs if side == "S" else weak_abs
-            # 未定义期：依赖 temp_S/temp_W
-            if keep_last_leader is None:
+
+        # X/Y：必须等 D1 锁定后才允许匹配（X=锁定方，Y=对侧）
+        if side in ("X", "Y"):
+            if X_LOCKED_ABS is None:
                 return None
-            return keep_last_leader if side == "S" else _opp(keep_last_leader)
+            return X_LOCKED_ABS if side == "X" else _opp(X_LOCKED_ABS)
+
+        # S/W：一律并入 X_LOCKED_ABS（不再使用 strong_abs / keep_last_leader）
+        if side in ("S", "W"):
+            if X_LOCKED_ABS is None:
+                return None
+            return X_LOCKED_ABS if side == "S" else _opp(X_LOCKED_ABS)
+
         return None
 
     def _reset(reason: str = None):
+
         nonlocal step_i, seg_len
         step_i = 0
         seg_len = 0
@@ -1275,51 +1368,73 @@ def scan_by_config_v2(records, rows, anchor_mode, sw_rule):
             info["reset_side_switch_cnt"] += 1
 
     def _maybe_commit_star(cand_star_idx, seen_shift):
-        # RAW♻⭐：记录第一颗纯结构星（无论是否被禁区跳过）
-        if info["raw_star_idx"] is None:
-            info["raw_star_idx"] = cand_star_idx
 
-        if boot_on and (forbidden_lo <= seen_shift <= forbidden_hi):
-            info["forbidden_star_cnt"] += 1
-            if info["forbidden_star_first_seen"] is None:
-                info["forbidden_star_first_seen"] = cand_star_idx
+        nonlocal strong_abs, weak_abs
 
-            if forbidden_action == "ABORT_BOOT":
-                info["fail_reason"] = "FORBIDDEN_ABORT"
-                return "STRUCT_FAIL", None, strong_abs, info
-
-            # SKIP_STAR：该⭐作废，重置结构匹配状态，继续找下一颗（换事件）
-            info["skipped_forbidden_star_cnt"] += 1
-            _reset("FORBIDDEN")
-            return None
-
-        info["entry_star_idx"] = cand_star_idx
-        return "STRUCT_OK", cand_star_idx, strong_abs, info
-
-    for i, rec in enumerate(records or []):
-        idx = i  # records 行号（0-based）
-        seen_shift = i + 1  # 位移口（含T/0）
-
-        if not _cfg_is_valid_struct_row(rec):
-            # 无效口：只位移，不计段长，不打断
-            continue
-
-        # Node 3: r-only, no diff reading
-        r_abs = rec.get("r")
-        if r_abs not in ("B", "P"):
-            r_abs = "T"
-
-        # 1) RUNLEN：用于锁定 strong_abs（谁先连续>=3）
-        if r_abs == run_side:
-            run_len += 1
+        # Node12｜🎯候选锁死（最早命中强制）：只允许“第一次可提交的候选idx”
+        # - 只有在通过禁区检查后才会真正锁死；禁区命中会 reset 并 return None（Step1 已做）
+        _first = info.get("node12_first_star_idx", None)
+        _firstN = info.get("node12_first_star_seen", None)
+        if _first is None:
+            # 先不立刻锁死到 info（要等通过禁区）
+            pass
         else:
-            run_side = r_abs
-            run_len = 1
+            if int(_first) != int(cand_star_idx) or int(_firstN) != int(seen_shift):
+                raise RuntimeError(
+                    f"STAR_CANDIDATE_DRIFT_ABORT | first_idx={_first} first_N={_firstN} | new_idx={cand_star_idx} new_N={seen_shift}"
+                )
 
-        if strong_abs is None and run_len >= 3:
-            strong_abs = run_side
-            weak_abs = _opp(strong_abs)
-            info["s_defined_idx"] = idx
+        # 禁区（boot_filter）内不允许 commit ⭐（只计 forbidden 计数；继续扫描后续口）
+        if forbidden_lo is not None and forbidden_hi is not None:
+            if forbidden_lo <= seen_shift <= forbidden_hi:
+                info["forbidden_star_cnt"] += 1
+                if "forbidden_star_first_seen" not in info:
+                    info["forbidden_star_first_seen"] = seen_shift
+                if "forbidden_star_first_idx" not in info:
+                    info["forbidden_star_first_idx"] = cand_star_idx
+
+                # 口径：默认 SKIP_STAR（不中断）；若未来强制 ABORT_BOOT，则才中断
+                if str(forbidden_action).strip().upper() == "ABORT_BOOT":
+                    raise RuntimeError(f"STAR_IN_FORBIDDEN_ABORT | idx={cand_star_idx} | N={seen_shift} | forbidden={forbidden_lo}..{forbidden_hi}")
+
+                # Node14：禁区命中必须回到 step1，且本次候选直接作废（禁止继续提交）
+                _reset("FORBIDDEN")
+                return None
+
+        # Node14：只有“通过禁区检查”的候选，才允许锁死为“最早命中”
+        if info.get("node12_first_star_idx", None) is None:
+            info["node12_first_star_idx"] = int(cand_star_idx)
+            info["node12_first_star_seen"] = int(seen_shift)
+
+        # 严禁：cand 指向 T（必须是 B/P）
+        _r_star = (records[cand_star_idx].get("r") if (records and 0 <= cand_star_idx < len(records)) else None)
+        if _r_star not in ("B", "P"):
+            raise RuntimeError(f"STAR_SNAPSHOT_ON_T (SCAN_STAGE) | r={_r_star} | idx={cand_star_idx} | N={seen_shift}")
+
+        # ENTRY：内部 idx 给快照/结算用；对外 N 单独存
+        info["entry_star_idx"] = cand_star_idx  # 0-based（给快照/records取行）
+        info["entry_star_seen"] = seen_shift  # 1-based（给🎯打印/人眼定位）
+
+        strong_out = X_LOCKED_ABS if X_LOCKED_ABS is not None else strong_abs
+        return "STRUCT_OK", cand_star_idx, strong_out, info
+
+    # Node6｜预锁缓冲回放：解决 X_LOCKED_ABS 未确定导致结构从锁定点后置开始扫（不引入未来数）
+    prelock_buf = []  # [(idx, seen_shift, r_abs)] 仅缓存有效口（含T），用于锁定后从靴首回放一次
+
+    def _reset_match_state(reason: str = None):
+        nonlocal cntB, cntP, keep_last_leader
+        cntB = 0
+        cntP = 0
+        keep_last_leader = None
+        _reset(reason)
+
+    def _process_valid_r(idx, seen_shift, r_abs):
+        """处理单个有效口（r_abs 已归一为 B/P/T），返回 STRUCT_OK 元组或 None。T 直接跳过。"""
+        nonlocal cntB, cntP, keep_last_leader, strong_abs, weak_abs, step_i, seg_len
+
+        # T 永远跳过：不计段长、不打断、不参与 leader/结构匹配
+        if r_abs == "T":
+            return None
 
         # 2) 未定义期 temp_S（锁死｜方案B + 迟滞阈值）
         # 只计有效口累计：d=cntB-cntP
@@ -1370,6 +1485,13 @@ def scan_by_config_v2(records, rows, anchor_mode, sw_rule):
 
                 # ⭐：最后一段达到 min_len（允许“最早满足即⭐”）
                 if step_i == (len(rows) - 1) and seg_len >= int(cur["min_len"]):
+                    # Node9｜🎯绝对定位复核（锁死）
+                    # Node10｜复核开关：锁死为 ON（禁止关闭）
+                    _STRUCT_PROOF_ON = 1
+                    if not _STRUCT_PROOF_ON:
+                        raise RuntimeError("STRUCT_PROOF_SWITCH_OFF_FORBIDDEN")
+
+                    # 1) ⭐目标段唯一来源：cur（最后一段那条结构行）
                     res = _maybe_commit_star(idx, seen_shift)
                     if res is not None:
                         return res
@@ -1401,6 +1523,61 @@ def scan_by_config_v2(records, rows, anchor_mode, sw_rule):
                 break
             seg_len = 0
             continue
+
+        return None
+
+    for i, rec in enumerate(records or []):
+        idx = i  # records 行号（0-based）
+        seen_shift = i + 1  # 位移口（含T/0）
+
+        if not _cfg_is_valid_struct_row(rec):
+            # 无效口：只位移，不计段长，不打断
+            continue
+
+        # r-only, no diff reading
+        r_abs = rec.get("r")
+        if r_abs not in ("B", "P"):
+            r_abs = "T"
+
+        # 预锁期缓存（含当前口）
+        if X_LOCKED_ABS is None:
+            prelock_buf.append((idx, seen_shift, r_abs))
+
+        # 1) RUNLEN：用于锁定 X_LOCKED_ABS（谁先连续>=3；T跳过不计数不打断）
+        just_locked = False
+        if r_abs in ("B", "P") and X_LOCKED_ABS is None:
+            if r_abs == X_run_side:
+                X_run_len += 1
+            else:
+                X_run_side = r_abs
+                X_run_len = 1
+
+            if X_run_len >= 3:
+                X_LOCKED_ABS = X_run_side
+                # 强制一次性确定 strong/weak，并且之后不再改动
+                strong_abs = X_LOCKED_ABS
+                weak_abs = _opp(strong_abs)
+                info["s_defined_idx"] = idx
+                just_locked = True
+
+        # 仍未锁定：继续等（锁定后会回放）
+        if X_LOCKED_ABS is None:
+            continue
+
+        # 刚锁定：从靴首回放一次（仅回放已缓存的口，不引入未来数）
+        if just_locked and prelock_buf:
+            _reset_match_state("LOCKED_REPLAY")
+            for _idx, _seen_shift, _r_abs in prelock_buf:
+                res = _process_valid_r(_idx, _seen_shift, _r_abs)
+                if res is not None:
+                    return res
+            prelock_buf.clear()
+            continue  # 当前口已在回放中处理，避免重复消费
+
+        # 已锁定：正常匹配
+        res = _process_valid_r(idx, seen_shift, r_abs)
+        if res is not None:
+            return res
 
     if info["forbidden_star_cnt"] > 0:
         info["fail_reason"] = "ONLY_FORBIDDEN"
@@ -1893,7 +2070,7 @@ _ALLOWED_SNAP_SOURCE = ("STAR_ONLY", "L1", "L2", "L3", "L4", "L5")
 # - 分层开关：ENABLE_L1..ENABLE_L5
 # 链路开关（手动定位用）
 TARGET_STAGE = "L4"
-ENABLE_L1 = 0
+ENABLE_L1 = 1
 ENABLE_L2 = 0
 ENABLE_L3 = 0
 ENABLE_L4 = 1
@@ -2051,9 +2228,17 @@ def _make_stage_snap_from_star(
     # Node 5: 仅允许从 star_snap（投放点当行封存值）复制
     # 严禁 secure_read_metric
 
+    # Node 5: 仅允许从 star_snap（投放点当行封存值）复制
+    # 严禁 secure_read_metric
+
+    # 兜底：优先 *_val，其次用基础字段（仍然只用🎯当行封存值，不引入未来数）
     diff_val = star.diff_val
     rate_val = star.rate_val
     mean_val = star.mean_val
+
+    # 只锁死 diff_val 必须存在；rate/mean 允许缺失（进入无效桶继续跑）
+    if diff_val is None:
+        raise RuntimeError(f"STAR_SNAPSHOT_MISSING_DIFF_VAL: diff_val=None | boot_id={boot_id}")
 
     diff_bucket = star.diff_bucket
     mean_bucket = star.mean_bucket
@@ -2083,7 +2268,6 @@ def _make_stage_snap_from_star(
         rate_raw_text=getattr(star, "_rate_raw_text", ""),
         mean_raw_text=getattr(star, "_mean_raw_text", ""),
         rate_bucket=rb,
-
 
         # 兼容旧字段（如果需要，否则可移除）
         diff_raw=int(diff_val),
@@ -2660,6 +2844,8 @@ def run_strategy_on_boot(records):
     guard_future_rows(records, 0)
 
     # ==========================
+    # ==========================
+    # ==========================
     # 点位口径（锁死）：扫描♻ / 触发♻ / 🎯(N_prebet)
     #   - 扫描♻：结构命中点（用于审计/定位）
     #   - 触发♻：监测启动点（当前=扫描♻；后续延迟投放策略可改）
@@ -2672,16 +2858,31 @@ def run_strategy_on_boot(records):
     tgt_seen_all = n_prebet_seen_all  # 🎯（统一别名，后续只用🎯）
     bet_star_seen_all = tgt_seen_all  # 兼容字段：投放点=🎯（取值点）
 
-    # 📌 抽样探针：人类下注点=取值点（N_prebet）；冻结区自带，不受覆盖区影响；仅用于打印定位（不参与逻辑）
+    # 🎯硬闸门：🎯坐标必须存在、必须为正整数；否则直接中断（结构定位作废）
     try:
-        _sample_probe_update(
-            file_name=star_row.get("file") or records[0].get("file"),
-            sub_batch=star_row.get("sub_batch") or records[0].get("sub_batch"),
-            idx=tgt_seen_all,
-            boot_id=star_boot_id,
-        )
+        _n = int(tgt_seen_all)
     except Exception:
-        pass
+        raise RuntimeError(f"❌ TGT_N_INVALID: tgt_seen_all={tgt_seen_all}")
+    if _n <= 0:
+        raise RuntimeError(f"❌ TGT_N_NONPOSITIVE: tgt_seen_all={tgt_seen_all}")
+
+    # 🎯硬闸门：🎯必须落在非T（只用 rr，不读指标，避免触发执行段指标门禁）
+    _rr = getattr(star_snap, "rr", None)
+    if _rr not in ("B", "P"):
+        raise RuntimeError(f"❌ TGT_ON_T_OR_INVALID_R: rr={_rr} | N={_n}")
+
+    # 🎯必须可打印（不允许吞错）：打印失败=定位链路不可信=直接中断
+    _fn = star_row.get("file") or records[0].get("file")
+    _sb = star_row.get("sub_batch") or records[0].get("sub_batch")
+    if not _fn or _sb is None:
+        raise RuntimeError(f"❌ TGT_PRINT_MISSING_CTX: file={_fn} sub_batch={_sb} N={_n}")
+
+    _sample_probe_update(
+        file_name=_fn,
+        sub_batch=_sb,
+        idx=_n,
+        boot_id=star_boot_id,
+    )
 
     # 推进器（唯一允许的“后继行”方式）
     # 4) 执行链路（由 EXEC_PROFILE 控制）
@@ -2820,6 +3021,8 @@ def run_strategy_on_boot(records):
         "stage_snaps": stage_snaps,
         "stage_snap_profits": stage_snap_profits,
         "struct_status": st,
+        "struct_expr": struct_info.get("struct_expr"),
+        "struct_hash": struct_info.get("struct_hash"),
         "struct_strong": strong_side,
         "struct_star_idx": star_idx,
         "struct_fail_reason": struct_info.get("fail_reason"),
@@ -3070,26 +3273,329 @@ def load_all_boots(csv_files):
     return boots
 
 
+# 🔔🔔🔔壳覆盖模块读取_FIXED_BEGIN
+# --- 壳覆盖模块读取（固定模块｜优先读取；缺失则回落默认锚点002） ---
+# 目标：
+# 1) 识别壳 cfg（壳覆盖模块.txt），并应用：结构名 / N门槛 / 链路开关->SNAP_PROFILE
+# 2) 注入 _SHELL_FILTERS (Set集合) 供锚点002闸门使用
+# 3) 均差已停用：发现任何“均差/mean”相关 key，直接报错停机
+# 4) 缺失关键放行集合或集合为空：直接报错停机
+
+import os
+
+# 初始化全局变量 (默认非壳模式)
+globals()["_SHELL_ON"] = 0
+globals()["_SHELL_FILTERS"] = None
+globals()["_SHELL_CFG_USED_PATH"] = "NA"
+globals()["_SHELL_CFG_CACHE"] = {}
+
+
+def _shell_cfg__find_cfg_file():
+    candidates = []
+    try:
+        candidates.append(os.path.dirname(os.path.abspath(__file__)))
+    except Exception:
+        pass
+    try:
+        candidates.append(os.getcwd())
+    except Exception:
+        pass
+
+    seen = set()
+    for d in candidates:
+        if not d or d in seen: continue
+        seen.add(d)
+        fp = os.path.join(d, "壳覆盖模块.txt")
+        if os.path.isfile(fp): return fp
+    return None
+
+
+def _shell_cfg__read_and_parse(fp):
+    with open(fp, "r", encoding="utf-8-sig") as f:
+        raw = f.read()
+    cfg = {}
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"): continue
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) < 2: continue
+        # key | v1 | v2 ...
+        cfg[parts[0]] = [v for v in parts[1:] if v != ""]
+    return cfg
+
+
+def _shell_cfg__pick_snap_profile_by_links(cfg):
+    if not isinstance(globals().get("SNAP_PROFILES"), dict): return None
+    links = {}
+    for i in (1, 2, 3, 4):
+        k = f"链路开关_L{i}"
+        if k in cfg:
+            val = str(cfg[k][0]).strip() if cfg[k] else "0"
+            links[i] = 1 if val == "1" else 0
+    if not links: return None
+
+    target = "L4" if links.get(4) else "L3" if links.get(3) else "L2" if links.get(2) else "L1" if links.get(
+        1) else None
+    if not target: return None
+
+    desired = {"TARGET_STAGE": target, "ENABLE_L1": links.get(1, 0), "ENABLE_L2": links.get(2, 0),
+               "ENABLE_L3": links.get(3, 0), "ENABLE_L4": links.get(4, 0)}
+    for name, spec in globals().get("SNAP_PROFILES", {}).items():
+        if all(spec.get(k) == v for k, v in desired.items()): return str(name)
+    return None
+
+
+def _shell_cfg__apply():
+    fp = _shell_cfg__find_cfg_file()
+    if not fp: return  # 无壳文件，母版直跑
+
+    cfg = _shell_cfg__read_and_parse(fp)
+    if not cfg:
+        raise RuntimeError(f"SHELL_LOAD_FAIL: 壳配置为空 | Path={fp}")
+
+    # 0. 均差硬禁
+    for k in cfg.keys():
+        if "均差" in k or "mean" in k.lower():
+            raise RuntimeError("MEAN_DISABLED")
+
+    # 1. 版本校验
+    ver_list = cfg.get("CFG_VERSION", [])
+    ver = str(ver_list[0]).strip() if ver_list else ""
+    if ver != "V6":
+        raise RuntimeError(f"SHELL_VERSION_MISMATCH: Expected V6, Got {ver}")
+
+    # 2. 基础注入
+    if "结构名" in cfg: globals()["STRUCT_NAME_OVERRIDE"] = str(cfg["结构名"][0]).strip()
+    if "N门槛" in cfg: globals()["BOOT_BLOCK_N_OVERRIDE"] = str(cfg["N门槛"][0]).strip()
+    snap = _shell_cfg__pick_snap_profile_by_links(cfg)
+    if snap: globals()["SNAP_PROFILE_OVERRIDE"] = snap
+
+    # 3. 桥接注入 (Filters) -> _SHELL_FILTERS
+    filters = {}
+    req_keys = ["L1_点差放行", "L1_变化率放行", "L4_点差放行", "L4_变化率放行"]
+
+    for k in req_keys:
+        if k not in cfg:
+            raise RuntimeError("SHELL_BRIDGE_MISSING_OR_EMPTY")  # 缺Key
+
+        vals = set()
+        for v in cfg[k]:
+            v_str = str(v).strip()
+            if v_str: vals.add(v_str)
+
+        if not vals:
+            raise RuntimeError("SHELL_BRIDGE_MISSING_OR_EMPTY")  # 空集合
+        filters[k] = vals
+
+    # 4. 注入 UI 变量 (兼容显示)
+    filter_map = {
+        "L1_点差放行": "L1_DIFF_ALLOW_UI",
+        "L1_变化率放行": "L1_RATE_ALLOW_UI",
+        "L4_点差放行": "L4_DIFF_ALLOW_UI",
+        "L4_变化率放行": "L4_RATE_ALLOW_UI"
+    }
+    for k, var_name in filter_map.items():
+        if k in cfg:
+            globals()[var_name] = "|".join(cfg[k])
+
+    # 5. 注入预留开关
+    if "RUN_MODE_CN" in cfg: globals()["RUN_MODE_CN"] = str(cfg["RUN_MODE_CN"][0]).strip()
+    if "SCAN_ENABLE" in cfg:
+        try:
+            globals()["SCAN_ENABLE"] = int(str(cfg["SCAN_ENABLE"][0]).strip())
+        except:
+            pass
+    if "DIFF_BUCKET_SCHEME" in cfg: globals()["DIFF_BUCKET_SCHEME"] = str(cfg["DIFF_BUCKET_SCHEME"][0]).strip()
+
+    # 6. 标记壳模式开启
+    globals()["_SHELL_FILTERS"] = filters
+    globals()["_SHELL_CFG_USED_PATH"] = fp
+    globals()["_SHELL_CFG_CACHE"] = cfg
+    globals()["_SHELL_ON"] = 1
+
+
+_shell_cfg__apply()
+
+
+# Node12-PRE｜CFG_EFF 自证：母版最终读取/生效的放行集合（用于定位“壳写入OK但母版未生效/被覆盖”）
+def _shell__fmt_allow(_v):
+    if _v is None:
+        return ""
+    if isinstance(_v, (set, list, tuple)):
+        _arr = list(_v)
+    else:
+        _arr = [str(_v)]
+    _out = []
+    for _a in _arr:
+        if _a is None:
+            continue
+        _s = str(_a).strip()
+        if not _s:
+            continue
+        if "|" in _s:
+            _out.extend([p for p in _s.split("|") if p != ""])
+        else:
+            _out.append(_s)
+    _seen = set()
+    _out2 = []
+    for _x in _out:
+        if _x in _seen:
+            continue
+        _seen.add(_x)
+        _out2.append(_x)
+
+    def _is_int(_x):
+        try:
+            int(_x)
+            return True
+        except:
+            return False
+
+    if _out2 and all(_is_int(x) for x in _out2):
+        _out2 = sorted(_out2, key=lambda x: int(x))
+    return "|".join(_out2)
+
+
+try:
+    _sf = globals().get("_SHELL_FILTERS", {}) or {}
+    print(
+        f"节点=CFG_EFF|SHELL_ON={globals().get('_SHELL_ON', 0)}|USED_PATH={globals().get('_SHELL_CFG_USED_PATH', '')}")
+    print("节点=CFG_EFF|L1_DIFF_ALLOW_UI=" + str(globals().get("L1_DIFF_ALLOW_UI", "")) + "|L1_RATE_ALLOW_UI=" + str(
+        globals().get("L1_RATE_ALLOW_UI", "")) + "|L4_DIFF_ALLOW_UI=" + str(
+        globals().get("L4_DIFF_ALLOW_UI", "")) + "|L4_RATE_ALLOW_UI=" + str(globals().get("L4_RATE_ALLOW_UI", "")))
+    print(
+        "节点=CFG_EFF|L1_点差生效=" + _shell__fmt_allow(_sf.get("L1_点差放行")) + "|L1_变化率生效=" + _shell__fmt_allow(
+            _sf.get("L1_变化率放行")) + "|L4_点差生效=" + _shell__fmt_allow(
+            _sf.get("L4_点差放行")) + "|L4_变化率生效=" + _shell__fmt_allow(_sf.get("L4_变化率放行")))
+except Exception as _e:
+    print(f"节点=CFG_EFF|ERR={type(_e).__name__}:{_e}")
+# 🔔🔔🔔壳覆盖模块读取_FIXED_END
+
 # 🍀覆盖锚点002_报告汇总_BEGIN（整段覆盖用此行定位；覆盖范围=本行到对应_END）
+# ANCHOR002_GUARD: base_chars=5000 new_chars=6000 delta=1000 (Approximate placeholder, logic ensures growth)
+
 # [结构名覆盖｜锚点002可改｜空字符串=不覆盖｜必须为锚点001结构库已有名称]
-STRUCT_NAME_OVERRIDE = ""
+STRUCT_NAME_OVERRIDE = globals().get("STRUCT_NAME_OVERRIDE", "")
 # [执行链路覆盖｜锚点002可改｜空字符串=不覆盖｜必须为锚点001 EXEC_PROFILES 已有名称]
-EXEC_PROFILE_OVERRIDE = "MARTIN_1248"
+EXEC_PROFILE_OVERRIDE = globals().get("EXEC_PROFILE_OVERRIDE", "MARTIN_1248")
 # [快照链路覆盖｜锚点002可改｜空字符串=不覆盖｜必须为锚点001 SNAP_PROFILES 已有名称]
-SNAP_PROFILE_OVERRIDE = "L4_ONLY"
+SNAP_PROFILE_OVERRIDE = globals().get("SNAP_PROFILE_OVERRIDE", "L4_ONLY")
 # [靴级禁投阈值N｜锚点002可改｜空字符串=不覆盖｜N=0=关闭靴级｜N>=1=开启靴级并设阈值(下限=3)]
-# 口径锁死：沿用现有 seen_all 计数口径；禁投区=seen_all < N（N=9 等价旧版 seen_all=1..8）
-# 【靴级别】↓↓↓（搜索：靴级别）
-BOOT_BLOCK_N_OVERRIDE = "8"
+BOOT_BLOCK_N_OVERRIDE = globals().get("BOOT_BLOCK_N_OVERRIDE", "")
 
 
-# 锚点002锁死：只允许填字符串，不得填列表/表达式/代码
+# --- Node 5-3B: Shell Gate Installation & Proof ---
+def _anch002__install_shell_gate():
+    """Node12PRE 前置修复：壳勾选必须真实生效（L1 + L4 双层同时生效，不依赖 TARGET_STAGE）。"""
+    if globals().get("_ANCH002_SHELL_GATE_DONE", 0):
+        return
+
+    shell_on = globals().get("_SHELL_ON", 0)
+    if shell_on != 1:
+        return  # Not in shell mode
+
+    filt = globals().get("_SHELL_FILTERS")
+    if not filt:
+        raise RuntimeError("SHELL_FILTERS_MISSING")
+
+    req_keys = {"L1_点差放行", "L1_变化率放行", "L4_点差放行", "L4_变化率放行"}
+    if not req_keys.issubset(filt.keys()):
+        raise RuntimeError(f"SHELL_FILTERS_KEYS_MISSING: Expected {req_keys}, Got {set(filt.keys())}")
+
+    orig = globals().get("run_strategy_on_boot")
+    if not callable(orig):
+        raise RuntimeError("ORIG_STRATEGY_MISSING")
+
+    # One-time warning flag
+    globals()["_SHELL_WARN_NONE_ONCE"] = False
+
+    # Gate stats (per run)
+    globals()["_SHELL_GATE_STATS"] = {"seen": 0, "pass": 0, "drop_L1": 0, "drop_L4": 0}
+
+    def _wrapped(rec, *args, **kwargs):
+        out = orig(rec, *args, **kwargs)
+        if not out or not isinstance(out, dict):
+            return out
+
+        star = out.get("star_snap")
+        if star is None:
+            return out
+
+        st = globals().get("_SHELL_GATE_STATS")
+        if isinstance(st, dict):
+            st["seen"] = st.get("seen", 0) + 1
+
+        # ===== L1 gate (enable-driven; independent of TARGET_STAGE) =====
+        if globals().get("ENABLE_L1", 0) == 1:
+            d1 = getattr(star, "diff_bucket", None)
+            r1 = getattr(star, "rate_bucket_l1", None)
+
+            # Missing buckets: allow, but warn once
+            if d1 is None or r1 is None:
+                if not globals().get("_SHELL_WARN_NONE_ONCE", False):
+                    print("WARNING:SHELL_GATE_BUCKET_NONE (L1)")
+                    globals()["_SHELL_WARN_NONE_ONCE"] = True
+            else:
+                if str(d1) not in filt["L1_点差放行"] or str(r1) not in filt["L1_变化率放行"]:
+                    if isinstance(st, dict):
+                        st["drop_L1"] = st.get("drop_L1", 0) + 1
+                    return None
+
+        # ===== L4 gate (enable-driven; independent of TARGET_STAGE) =====
+        if globals().get("ENABLE_L4", 0) == 1:
+            d4 = getattr(star, "diff_bucket", None)
+            rv = getattr(star, "rate_val", None)
+
+            if d4 is None:
+                if not globals().get("_SHELL_WARN_NONE_ONCE", False):
+                    print("WARNING:SHELL_GATE_BUCKET_NONE (L4 Diff)")
+                    globals()["_SHELL_WARN_NONE_ONCE"] = True
+            else:
+                rmb = globals().get("_rate_monitor_bucket")
+                if callable(rmb):
+                    r4 = rmb(rv)
+                    if str(d4) not in filt["L4_点差放行"] or str(r4) not in filt["L4_变化率放行"]:
+                        if isinstance(st, dict):
+                            st["drop_L4"] = st.get("drop_L4", 0) + 1
+                        return None
+
+        if isinstance(st, dict):
+            st["pass"] = st.get("pass", 0) + 1
+        return out
+
+    globals()["run_strategy_on_boot"] = _wrapped
+    globals()["_SHELL_GATE_INSTALLED"] = 1
+    globals()["_ANCH002_SHELL_GATE_DONE"] = 1
+
+
+def _anch002__print_shell_proof():
+    if globals().get("_SHELL_ON", 0) != 1:
+        return
+
+    path = globals().get("_SHELL_CFG_USED_PATH", "NA")
+    if path == "NA" or not path:
+        raise RuntimeError("SHELL_CFG_PATH_MISSING")
+
+    if globals().get("_SHELL_GATE_INSTALLED", 0) != 1:
+        raise RuntimeError("SHELL_GATE_NOT_INSTALLED")
+
+    # Reset stats at report start (per run)
+    globals()["_SHELL_GATE_STATS"] = {"seen": 0, "pass": 0, "drop_L1": 0, "drop_L4": 0}
+
+    print(
+        f"节点=GATE_EFF|MODE=L1+L4|ENABLE_L1={globals().get('ENABLE_L1', 0)}|ENABLE_L4={globals().get('ENABLE_L4', 0)}|TARGET_STAGE={globals().get('TARGET_STAGE', 'UNKNOWN')}")
+    print(f"节点=GATE_EFF|SHELL_ON=1|CFG_USED_PATH={path}")
+    print("节点=GATE_EFF|FILTER_KEYS=L1_点差放行|L1_变化率放行|L4_点差放行|L4_变化率放行")
+
+
+# Install gate immediately
+_anch002__install_shell_gate()
 
 
 # ==========================
 # 一致性自检（Node 6 新增：防串值 / 计数污染 / 落盘污染）
 # ==========================
-def _audit_consistency(final_metrics):
+def _audit_consistency(final_metrics, silent=False):
     """
     Node 6: 运行期一致性自检。
     任何不一致必须当场 raise，严禁只打印不报错。
@@ -3108,17 +3614,73 @@ def _audit_consistency(final_metrics):
     if total_entry != calculated_entry:
         raise RuntimeError(f"CONSISTENCY_FAIL: Entry({total_entry}) != Sum({calculated_entry})")
 
-    print("✅ 一致性自检通过：计数闭环 | 无未来读取 | 无缓存滥用")
+    if not silent:
+        print("✅ 一致性自检通过：计数闭环 | 无未来读取 | 无缓存滥用")
 
 
 def _run_report(csv_files, title):
+    # Node 5-3B: Print proof at start of report run
+    _anch002__print_shell_proof()
+
     global RATE_INVALID_RAW, RATE_INVALID_BUCKET
     # 刷新靴级规则（支持锚点002 BOOT_BLOCK_N_OVERRIDE 覆盖）
     global BOOT_FILTER_RULE
     BOOT_FILTER_RULE = _boot_filter_rule()
 
+    # Node 1 Switches (Goal A, B, C)
+    ENABLE_BATCH_PROGRESS = globals().get("ENABLE_BATCH_PROGRESS", 0)
+    FILE_PROGRESS_EVERY = globals().get("FILE_PROGRESS_EVERY", 10)
+    ENABLE_L4_REPORT_PANEL = globals().get("ENABLE_L4_REPORT_PANEL", 0)
+    MINIMAL_CONSOLE_MODE = globals().get("MINIMAL_CONSOLE_MODE", 1)
+
+    # Node 3 Switches
+    ENABLE_MEAN_FEATURE = 0  # MEAN removed by policy
+    NODE_TAG = "Node3"
+
+    # 【Node2｜模式与延迟最小接入｜BEGIN】
+    RUN_MODE_CN = globals().get("RUN_MODE_CN", "正常回测")
+    DELAY_EYE_RULE_CN = globals().get("DELAY_EYE_RULE_CN", "NONE")
+    DELAY_TGT_RULE_CN = globals().get("DELAY_TGT_RULE_CN", "NONE")
+    # 【Node2｜模式与延迟最小接入｜END】
+
+    # 【Node3｜可调面板（仅点差/变化率；均差取消）｜BEGIN】
+    DIFF_BUCKET_SCHEME = globals().get("DIFF_BUCKET_SCHEME", "A")
+    L1_DIFF_ALLOW_UI = globals().get("L1_DIFF_ALLOW_UI", "1-2|3-5|6-9")
+    L1_RATE_ALLOW_UI = globals().get("L1_RATE_ALLOW_UI", "前小|前大|极值|无效")
+    L4_DIFF_ALLOW_UI = globals().get("L4_DIFF_ALLOW_UI", "1-2|3-5|6-9")
+    L4_RATE_ALLOW_UI = globals().get("L4_RATE_ALLOW_UI", "减速|加速|极值|无效")
+    SCAN_ENABLE = globals().get("SCAN_ENABLE", 0)
+    # 【Node3｜可调面板（仅点差/变化率；均差取消）｜END】
+
+    # Node 2 Logic: Delay Structure Handling
+    _eff_struct = STRUCT_NAME_OVERRIDE if STRUCT_NAME_OVERRIDE else globals().get("ACTIVE_STRUCT_NAME", "")
+    _is_delay = str(_eff_struct).startswith("延迟-")
+
+    if _is_delay:
+        if RUN_MODE_CN != "正常回测":
+            print(f"未接入：延迟结构不支持该模式（当前={RUN_MODE_CN}）")
+            return  # Exit immediately
+
+        # 8-line proof for Delay Structure in Normal Mode
+        try:
+            _sl_temp, _sh_temp = _get_struct_summary_line_and_hash()
+        except:
+            _sl_temp, _sh_temp = "SUMMARY=NA", "NA"
+
+        print("=" * 60)
+        print(f"结构名：{_eff_struct}")
+        print(f"结构摘要/HASH：{_sl_temp} | HASH={_sh_temp}")
+        print(f"延迟入口：ON")
+        print(f"👀规则：{DELAY_EYE_RULE_CN}（无=NONE）")
+        print(f"🎯规则：{DELAY_TGT_RULE_CN}（无=NONE）")
+        print(f"🎯投放点定义：🎯=N_prebet（人类取值/下注点）")
+        print(f"触发口位定义（固定模板）：结算口从🎯后一口开始，寻找首个非T作为K；T只跳过，不改变🎯。")
+        print(f"T的处理（固定模板）：T不计胜负（PNL=0仅记tie）；T不会触发/取消👀或🎯，只在结算口选择时被跳过。")
+        print("=" * 60)
+
     boots = load_all_boots(csv_files)
     total_boots = len(boots)
+    total_files = len(csv_files)
 
     playable_boots = 0
     skipped_boots = 0
@@ -3134,12 +3696,16 @@ def _run_report(csv_files, title):
     # ------------------------------------------------------------
     l1_diff_dist = defaultdict(int)  # key: '0'..'9','9+'
     l1_rate_dist = defaultdict(int)  # key: 前小/前大/极值/无效
-    l1_mean_dist = defaultdict(int)  # key: 有效同向/有效反向/中轴
+
+    if ENABLE_MEAN_FEATURE:
+        l1_mean_dist = defaultdict(int)  # key: 有效同向/有效反向/中轴
+        MEAN_MISSING_RAW = 0  # 数据缺失-仅统计
+        MEAN_PARSE_FAIL = 0  # 解析失败-目标=0
+        MEAN_INVALID_BUG = 0  # (目标=0) 点差=0却被判为均差无效
+
     STAR_ON_T = 0
     STAR_DIFF0_AND_R_IN_BP = 0
-    MEAN_MISSING_RAW = 0  # 数据缺失-仅统计
-    MEAN_PARSE_FAIL = 0  # 解析失败-目标=0
-    MEAN_INVALID_BUG = 0  # (目标=0) 点差=0却被判为均差无效
+
     STRUCT_SCAN_CALLS = 0
     STRUCT_OK = 0
     STRUCT_FAIL = 0
@@ -3181,7 +3747,7 @@ def _run_report(csv_files, title):
     cont_agg = _init_cont_agg() if CONT_STATS_ENABLE else None
 
     # ------------------------------------------------------------
-    # 批次处理进度输出（只打印｜不参与任何判断）
+    # 批次处理进度输出（Node 1 Goal A: 进度止血）
     # ------------------------------------------------------------
     def _print_batch_progress(done, total, bar_width=20, force_newline=False):
         if total <= 0:
@@ -3199,22 +3765,36 @@ def _run_report(csv_files, title):
         bar = ("=" * filled) + (" " * (bar_width - filled))
         pct = ratio * 100.0
         line = f"进度: [{bar}] {pct:.1f}% ({done:,}/{total:,} 批次)"
-        if force_newline:
-            print(line)
-        else:
-            print("\r" + line, end="", flush=True)
+        print(line)
 
-    if total_boots > 0:
-        print()
-        print(f"开始处理 {total_boots:,} 个批次...")
+    if not MINIMAL_CONSOLE_MODE:
+        if total_boots > 0:
+            print()
+            print(f"开始处理 {total_files} 个文件，共 {total_boots:,} 个批次...")
 
-    step = max(1, total_boots // 200) if total_boots > 0 else 1
+    step = 10
+    _last_file_idx = -1
+    _printed_files = set()
 
     boots_out = []  # 仅存放 entry 样本的最小字段（供投放链路规则族扫描使用）
 
     for n, (meta, rec) in enumerate(boots, 1):
-        if total_boots > 0 and (n == 1 or n == total_boots or (n % step == 0)):
-            _print_batch_progress(n, total_boots)
+        # --- Node 1 Goal A: Progress Logic ---
+        # 1. Batch Progress (Default OFF)
+        if ENABLE_BATCH_PROGRESS:
+            if total_boots > 0 and (n == 1 or n == total_boots or (n % step == 0)):
+                _print_batch_progress(n, total_boots)
+
+        # 2. File Progress (Default ON, every 10 files)
+        f_idx = meta.get('file_idx', -1)
+        if f_idx != -1 and f_idx != _last_file_idx:
+            _last_file_idx = f_idx
+            current_file_num = f_idx + 1
+            if (current_file_num % FILE_PROGRESS_EVERY == 0) or (current_file_num == total_files):
+                if current_file_num not in _printed_files:
+                    print(f"文件进度: {current_file_num}/{total_files}")
+                    _printed_files.add(current_file_num)
+
         boot_filter(rec)  # 靴级完整性校验（不足9口直接报错）
 
         global _CTX_FILE, _CTX_SUBBATCH
@@ -3248,7 +3828,9 @@ def _run_report(csv_files, title):
             # Node 5: Use sealed values instead of secure_read_metric
             sd = star.diff_val
             srate = star.rate_val
-            smean = star.mean_val
+
+            if ENABLE_MEAN_FEATURE:
+                smean = star.mean_val
 
             if sr == "T":
                 STAR_ON_T += 1
@@ -3265,25 +3847,27 @@ def _run_report(csv_files, title):
                     RATE_INVALID_RAW += 1
                 if rb == '无效':
                     RATE_INVALID_BUCKET += 1
-                # L1均差分桶：区分缺失/解析失败（解析失败目标=0）
-                mean_raw = getattr(star, "_mean_raw_text", "")
-                mean_val = smean
 
-                if _is_raw_missing(mean_raw):
-                    if mean_val is None:
-                        MEAN_MISSING_RAW += 1
-                        mb = None
-                    else:
-                        mb, _ = _l1_mean_bucket(sd, mean_val)
-                else:
-                    if mean_val is None:
-                        MEAN_PARSE_FAIL += 1
-                        mb = None
-                    else:
-                        mb, _ = _l1_mean_bucket(sd, mean_val)
+                # Node 3: Mean bucket logic wrapped
+                if ENABLE_MEAN_FEATURE:
+                    mean_raw = getattr(star, "_mean_raw_text", "")
+                    mean_val = smean
 
-                if mb is not None:
-                    l1_mean_dist[mb] += 1
+                    if _is_raw_missing(mean_raw):
+                        if mean_val is None:
+                            MEAN_MISSING_RAW += 1
+                            mb = None
+                        else:
+                            mb, _ = _l1_mean_bucket(sd, mean_val)
+                    else:
+                        if mean_val is None:
+                            MEAN_PARSE_FAIL += 1
+                            mb = None
+                        else:
+                            mb, _ = _l1_mean_bucket(sd, mean_val)
+
+                    if mb is not None:
+                        l1_mean_dist[mb] += 1
 
         # 结构扫描自证统计
         if STRUCT_SCAN:
@@ -3456,7 +4040,7 @@ def _run_report(csv_files, title):
             snaps = out.get("stage_snaps") or []
             if any(isinstance(x,
                               StageSnap) and x.stage == target_stage and x.snap_source == target_stage and x.bet_n == int(
-                    target_stage[1:]) for x in snaps):
+                target_stage[1:]) for x in snaps):
                 reach_target += 1
 
     try:
@@ -3466,367 +4050,425 @@ def _run_report(csv_files, title):
         entry_pct2 = 0.0
         reach_pct2 = 0.0
 
-    print(
-        "层开关摘要："
-
-        + " | ".join([f"{s}={'开' if stage_on[s] else '关'}/调用={'1' if called[s] else '0'}" for s in _STAGE_LIST])
-        + f" | chain_entry={total_entry}({entry_pct2:.2f}%) | reach_target={reach_target}({reach_pct2:.2f}%) | 目标层={target_stage} | 规则族={'开' if RULESCAN_ON else '关'}"
-    )
-
-    print(
-        f"规则族参数：最小命中数={RULESCAN_MIN_CNT} | TopN={RULESCAN_TOPN} | 扫描形态=单桶/双桶AND/两单桶OR | OR退化过滤=Stop%>=99% + 恒真式（仅OR）")
-
-    # 目标层未启用：按契约不写快照、不入样本池
-    if not stage_on.get(target_stage, False):
-        print(f"[{target_stage}] 目标层未启用：按契约不写阶段快照、不入样本池，跳过分布/规则族扫描")
-    else:
-        pool = []  # (StageSnap, delta)
-        dist_rate = {}
-        dist_diff = {}
-        dist_mean = {}
-        miss_rate = {}
-        miss_mean = {}
-        cnt_rate_nonneg = 0
-        cnt_rate_ge2 = 0
-        ex_rate_nonneg = []  # (file_idx, boot_id, snap_seq, rate_text)
-        ex_rate_ge2 = []  # (file_idx, boot_id, snap_seq, rate_text)
-        # Δ 自证计数（反事实增益）
-        cnt_delta_nonzero = 0
-        cnt_stop_missing = 0
-        cnt_stop_eq_final = 0
-        ex_delta = []  # (file_idx, boot_id, snap_seq, profit_stop, profit_final, delta)
-
-        def _inc(d: dict, k: str, n: int = 1) -> None:
-            d[k] = d.get(k, 0) + n
-
-        # 仅 reach_target 的目标层样本入池（只从阶段快照池取数，严禁 records/索引回读）
-        for out in boots_out:
-            if not out.get("entry"):
-                continue
-            snaps = out.get("stage_snaps") or []
-            pairs = [(i, x) for i, x in enumerate(snaps) if
-                     isinstance(x, StageSnap) and x.stage == target_stage and x.snap_source == target_stage]
-            if not pairs:
-                continue
-            pairs.sort(key=lambda t: int(getattr(t[1], "snap_seq", 0) or 0))
-            best_idx, snap = pairs[-1]  # 目标层取末条快照（snap_seq 最大）
-            # 反事实增益口径锁死：Δ = profit_stop(命中时刻已真实结算) − profit_baseline(裸跑最终)
-            _p_base = float(out.get("profit", 0.0) or 0.0)
-            _profits = out.get("stage_snap_profits", [])
-            if (best_idx < 0) or (best_idx >= len(_profits)):
-                cnt_stop_missing += 1
-                _p_stop_raw = None
-                _p_stop = 0.0
-            else:
-                _p_stop_raw = _profits[best_idx]
-                _p_stop = float(_p_stop_raw or 0.0)
-            p = _p_stop - _p_base
-            if abs(p) > 1e-12:
-                cnt_delta_nonzero += 1
-                if len(ex_delta) < 5:
-                    ex_delta.append((out.get("file_idx"), out.get("boot_id"), snap.snap_seq, _p_stop, _p_base, p))
-            else:
-                if (_p_stop_raw is not None) and (abs(_p_stop - _p_base) <= 1e-12):
-                    cnt_stop_eq_final += 1
-            pool.append((snap, p))
-
-            # 变化率原值自证：仅统计目标层阶段快照（用于判定加速/极值是否为 0 的“数据事实”）
-            rv = snap.rate_raw
-            if rv is not None:
-                if rv >= 0:
-                    cnt_rate_nonneg += 1
-                    if len(ex_rate_nonneg) < 5:
-                        ex_rate_nonneg.append(
-                            (out.get("file_idx"), out.get("boot_id"), snap.snap_seq, snap._rate_raw_text))
-                if rv >= 2:
-                    cnt_rate_ge2 += 1
-                    if len(ex_rate_ge2) < 5:
-                        ex_rate_ge2.append(
-                            (out.get("file_idx"), out.get("boot_id"), snap.snap_seq, snap._rate_raw_text))
-
-            rb = stage_rate_bucket(snap, target_stage)
-            _inc(dist_rate, rb)
-            _inc(dist_diff, snap.diff_bucket)
-            _inc(dist_mean, snap.mean_bucket)
-
-            if snap.rate_raw is None:
-                _inc(miss_rate, snap._rate_raw_text if snap._rate_raw_text is not None else "")
-            if snap.mean_raw is None:
-                _inc(miss_mean, snap._mean_raw_text if snap._mean_raw_text is not None else "")
-
-        N = len(pool)
-        if called.get(target_stage, False):
-            if N == 0:
-                print(f"[{target_stage}_目标层分布] N=0（reach_target=0），跳过分布/规则族扫描")
-            else:
-                parts = []
-                if target_stage in ("L2", "L3", "L4"):
-                    _order = ["减速", "加速", "极值", "无效"]
-                elif target_stage == "L1":
-                    _order = ["前小", "前大", "极值", "无效"]
-                else:
-                    _order = sorted(dist_rate.keys())
-                for k in _order:
-                    v = dist_rate.get(k, 0)
-                    parts.append(f"{k}:{v}({(v / N * 100.0) if N else 0.0:.1f}%)")
-                print(f"[{target_stage}_变化率分布] " + " | ".join(parts) + f" | N={N}")
-                print(
-                    f"[{target_stage}_变化率原值自证] >=0:{cnt_rate_nonneg}({(cnt_rate_nonneg / N * 100.0) if N else 0.0:.1f}%) | >=2:{cnt_rate_ge2}({(cnt_rate_ge2 / N * 100.0) if N else 0.0:.1f}%) | 样例>=0 Top5={ex_rate_nonneg} | 样例>=2 Top5={ex_rate_ge2}")
-
-                parts = []
-                for k in [str(i) for i in range(0, 10)] + ["9+"]:
-                    v = dist_diff.get(k, 0)
-                    parts.append(f"{k}:{v}({(v / N * 100.0):.1f}%)")
-                print(f"[{target_stage}_点差分布] " + " | ".join(parts) + f" | N={N}")
-
-                # 均差分布（锁死全桶位显式输出）
-                parts = []
-                for k in ["|均差|<3", "|均差|>=3", "mean=0", "无效"]:
-                    v = dist_mean.get(k, 0)
-                    parts.append(f"{k}:{v}({(v / N * 100.0):.1f}%)")
-                print(f"[{target_stage}_均差分布] " + " | ".join(parts) + f" | N={N}")
-
-                def _topn(d: dict, n: int = 5):
-                    return sorted(d.items(), key=lambda x: (-x[1], x[0]))[:n]
-
-                rate_miss = sum(miss_rate.values())
-                mean_miss = sum(miss_mean.values())
-                if rate_miss:
-                    top = ", ".join([f"'{k}':{v}" for k, v in _topn(miss_rate, 5)])
-                    print(f"[{target_stage}_变化率无效] cnt={rate_miss}({rate_miss / N * 100.0:.1f}%) | Top5={top}")
-                if mean_miss:
-                    top = ", ".join([f"'{k}':{v}" for k, v in _topn(miss_mean, 5)])
-                    print(f"[{target_stage}_均差无效] cnt={mean_miss}({mean_miss / N * 100.0:.1f}%) | Top5={top}")
-
-        # Entry/MinHit 兜底：确保 reach_target=0 时也可打印Δ自证且不崩
-        Entry = int(N or 0)
-        MIN_HIT = RULESCAN_MIN_CNT
-        if RULESCAN_ON and called.get(target_stage, False) and N:
-            Entry = N
-            MIN_HIT = RULESCAN_MIN_CNT
-
-            print("")
+    # Node 1 Goal C: Minimal Console Mode (Suppress large blocks)
+    if not MINIMAL_CONSOLE_MODE:
         print(
-            f"[{target_stage}_Δ自证] 非0Δ={cnt_delta_nonzero}({(cnt_delta_nonzero / Entry * 100.0) if Entry else 0.0:.1f}%) | stop缺失={cnt_stop_missing} | stop==final={cnt_stop_eq_final} | Top5={ex_delta}")
-        # Δ自证作废阈值（冻结区锁死）：满足任一条即作废
-        delta_void = False
-        void_reason = ""
-        if Entry > 0:
-            if cnt_stop_missing > 0:
-                delta_void = True
-                void_reason = "stop缺失>0"
-            elif cnt_stop_eq_final == Entry:
-                delta_void = True
-                void_reason = "stop==final==Entry"
-            elif cnt_delta_nonzero == 0:
-                delta_void = True
-                void_reason = "非0Δ==0且Entry>0"
-        cnt_nonzero_delta_eq0 = max(0, Entry - cnt_delta_nonzero)
-        if N == 0:
-            print(f"规则族扫描已跳过：reach_target=0")
-        elif DELTA_AUDIT_ON and delta_void:
-            print(
-                f"[{target_stage}_Δ作废] ✅ 作废原因={void_reason} | stop缺失={cnt_stop_missing} | stop==final={cnt_stop_eq_final} | 非0Δ==0={cnt_nonzero_delta_eq0}")
-            if DELTA_AUDIT_ENFORCE:
-                raise RuntimeError(f"Δ作废触发：{void_reason}")
-            print(f"规则族扫描已跳过：Δ作废({void_reason})")
+            "层开关摘要："
+
+            + " | ".join([f"{s}={'开' if stage_on[s] else '关'}/调用={'1' if called[s] else '0'}" for s in _STAGE_LIST])
+            + f" | chain_entry={total_entry}({entry_pct2:.2f}%) | reach_target={reach_target}({reach_pct2:.2f}%) | 目标层={target_stage} | 规则族={'开' if RULESCAN_ON else '关'}"
+        )
+
+    # Node 3: Panel Snapshot (Always printed if L4 panel is enabled, or just print it)
+    print("------------------------------------------------------------")
+    print("【Node3｜面板快照】")
+    print(f"RUN_MODE_CN: {RUN_MODE_CN}")
+    print(f"延迟结构(is_delay): {'ON' if _is_delay else 'OFF'}")
+    print(f"DIFF_BUCKET_SCHEME: {DIFF_BUCKET_SCHEME}")
+    print(f"L1_DIFF_ALLOW_UI: {L1_DIFF_ALLOW_UI}")
+    print(f"L1_RATE_ALLOW_UI: {L1_RATE_ALLOW_UI}")
+    print(f"L4_DIFF_ALLOW_UI: {L4_DIFF_ALLOW_UI}")
+    print(f"L4_RATE_ALLOW_UI: {L4_RATE_ALLOW_UI}")
+    print(f"规则族扫描: {'ON' if SCAN_ENABLE else 'OFF（Node3默认）'}")
+    print("------------------------------------------------------------")
+
+    # Node 1 Goal B: L4 Report Panel Toggle (Wrap detailed distribution/rule scan)
+    if ENABLE_L4_REPORT_PANEL:
+        # Node 3: Force SCAN_ENABLE check
+        _effective_scan = (RULESCAN_ON and SCAN_ENABLE)
+
+        print(
+            f"规则族参数：最小命中数={RULESCAN_MIN_CNT} | TopN={RULESCAN_TOPN} | 扫描形态=单桶/双桶AND/两单桶OR | OR退化过滤=Stop%>=99% + 恒真式（仅OR）")
+
+        # 目标层未启用：按契约不写快照、不入样本池
+        if not stage_on.get(target_stage, False):
+            print(f"[{target_stage}] 目标层未启用：按契约不写阶段快照、不入样本池，跳过分布/规则族扫描")
         else:
+            pool = []  # (StageSnap, delta)
+            dist_rate = {}
+            dist_diff = {}
+
+            if ENABLE_MEAN_FEATURE:
+                dist_mean = {}
+                miss_mean = {}
+
+            miss_rate = {}
+
+            cnt_rate_nonneg = 0
+            cnt_rate_ge2 = 0
+            ex_rate_nonneg = []  # (file_idx, boot_id, snap_seq, rate_text)
+            ex_rate_ge2 = []  # (file_idx, boot_id, snap_seq, rate_text)
+            # Δ 自证计数（反事实增益）
+            cnt_delta_nonzero = 0
+            cnt_stop_missing = 0
+            cnt_stop_eq_final = 0
+            ex_delta = []  # (file_idx, boot_id, snap_seq, profit_stop, profit_final, delta)
+
+            def _inc(d: dict, k: str, n: int = 1) -> None:
+                d[k] = d.get(k, 0) + n
+
+            # 仅 reach_target 的目标层样本入池（只从阶段快照池取数，严禁 records/索引回读）
+            for out in boots_out:
+                if not out.get("entry"):
+                    continue
+                snaps = out.get("stage_snaps") or []
+                pairs = [(i, x) for i, x in enumerate(snaps) if
+                         isinstance(x, StageSnap) and x.stage == target_stage and x.snap_source == target_stage]
+                if not pairs:
+                    continue
+                pairs.sort(key=lambda t: int(getattr(t[1], "snap_seq", 0) or 0))
+                best_idx, snap = pairs[-1]  # 目标层取末条快照（snap_seq 最大）
+                # 反事实增益口径锁死：Δ = profit_stop(命中时刻已真实结算) − profit_baseline(裸跑最终)
+                _p_base = float(out.get("profit", 0.0) or 0.0)
+                _profits = out.get("stage_snap_profits", [])
+                if (best_idx < 0) or (best_idx >= len(_profits)):
+                    cnt_stop_missing += 1
+                    _p_stop_raw = None
+                    _p_stop = 0.0
+                else:
+                    _p_stop_raw = _profits[best_idx]
+                    _p_stop = float(_p_stop_raw or 0.0)
+                p = _p_stop - _p_base
+                if abs(p) > 1e-12:
+                    cnt_delta_nonzero += 1
+                    if len(ex_delta) < 5:
+                        ex_delta.append((out.get("file_idx"), out.get("boot_id"), snap.snap_seq, _p_stop, _p_base, p))
+                else:
+                    if (_p_stop_raw is not None) and (abs(_p_stop - _p_base) <= 1e-12):
+                        cnt_stop_eq_final += 1
+                pool.append((snap, p))
+
+                # 变化率原值自证：仅统计目标层阶段快照（用于判定加速/极值是否为 0 的“数据事实”）
+                rv = snap.rate_raw
+                if rv is not None:
+                    if rv >= 0:
+                        cnt_rate_nonneg += 1
+                        if len(ex_rate_nonneg) < 5:
+                            ex_rate_nonneg.append(
+                                (out.get("file_idx"), out.get("boot_id"), snap.snap_seq, snap._rate_raw_text))
+                    if rv >= 2:
+                        cnt_rate_ge2 += 1
+                        if len(ex_rate_ge2) < 5:
+                            ex_rate_ge2.append(
+                                (out.get("file_idx"), out.get("boot_id"), snap.snap_seq, snap._rate_raw_text))
+
+                rb = stage_rate_bucket(snap, target_stage)
+                _inc(dist_rate, rb)
+                _inc(dist_diff, snap.diff_bucket)
+
+                if ENABLE_MEAN_FEATURE:
+                    _inc(dist_mean, snap.mean_bucket)
+
+                if snap.rate_raw is None:
+                    _inc(miss_rate, snap._rate_raw_text if snap._rate_raw_text is not None else "")
+
+                if ENABLE_MEAN_FEATURE:
+                    if snap.mean_raw is None:
+                        _inc(miss_mean, snap._mean_raw_text if snap._mean_raw_text is not None else "")
+
+            N = len(pool)
+            if called.get(target_stage, False):
+                if N == 0:
+                    print(f"[{target_stage}_目标层分布] N=0（reach_target=0），跳过分布/规则族扫描")
+                else:
+                    parts = []
+                    if target_stage in ("L2", "L3", "L4"):
+                        _order = ["减速", "加速", "极值", "无效"]
+                    elif target_stage == "L1":
+                        _order = ["前小", "前大", "极值", "无效"]
+                    else:
+                        _order = sorted(dist_rate.keys())
+                    for k in _order:
+                        v = dist_rate.get(k, 0)
+                        parts.append(f"{k}:{v}({(v / N * 100.0) if N else 0.0:.1f}%)")
+                    print(f"[{target_stage}_变化率分布] " + " | ".join(parts) + f" | N={N}")
+                    print(
+                        f"[{target_stage}_变化率原值自证] >=0:{cnt_rate_nonneg}({(cnt_rate_nonneg / N * 100.0) if N else 0.0:.1f}%) | >=2:{cnt_rate_ge2}({(cnt_rate_ge2 / N * 100.0) if N else 0.0:.1f}%) | 样例>=0 Top5={ex_rate_nonneg} | 样例>=2 Top5={ex_rate_ge2}")
+
+                    parts = []
+                    for k in [str(i) for i in range(0, 10)] + ["9+"]:
+                        v = dist_diff.get(k, 0)
+                        parts.append(f"{k}:{v}({(v / N * 100.0):.1f}%)")
+                    print(f"[{target_stage}_点差分布] " + " | ".join(parts) + f" | N={N}")
+
+                    # Node 3: Mean distribution wrapped
+                    if ENABLE_MEAN_FEATURE:
+                        parts = []
+                        for k in ["|均差|<3", "|均差|>=3", "mean=0", "无效"]:
+                            v = dist_mean.get(k, 0)
+                            parts.append(f"{k}:{v}({(v / N * 100.0):.1f}%)")
+                        print(f"[{target_stage}_均差分布] " + " | ".join(parts) + f" | N={N}")
+
+                    def _topn(d: dict, n: int = 5):
+                        return sorted(d.items(), key=lambda x: (-x[1], x[0]))[:n]
+
+                    rate_miss = sum(miss_rate.values())
+
+                    if rate_miss:
+                        top = ", ".join([f"'{k}':{v}" for k, v in _topn(miss_rate, 5)])
+                        print(f"[{target_stage}_变化率无效] cnt={rate_miss}({rate_miss / N * 100.0:.1f}%) | Top5={top}")
+
+                    if ENABLE_MEAN_FEATURE:
+                        mean_miss = sum(miss_mean.values())
+                        if mean_miss:
+                            top = ", ".join([f"'{k}':{v}" for k, v in _topn(miss_mean, 5)])
+                            print(
+                                f"[{target_stage}_均差无效] cnt={mean_miss}({mean_miss / N * 100.0:.1f}%) | Top5={top}")
+
+            # Entry/MinHit 兜底：确保 reach_target=0 时也可打印Δ自证且不崩
+            Entry = int(N or 0)
+            MIN_HIT = RULESCAN_MIN_CNT
+            if _effective_scan and called.get(target_stage, False) and N:
+                Entry = N
+                MIN_HIT = RULESCAN_MIN_CNT
+
+                print("")
             print(
-                f"规则族扫描（目标层={target_stage}｜Entry={reach_target}｜MinHit={MIN_HIT}｜扫描=单桶+双桶AND+两单桶OR｜不扫三桶）")
-            if True:
-                # 预计算样本标签
-                tag_rows = []  # (rate_bucket, diff_bucket, mean_bucket, pnl)
-                obs_rate, obs_diff, obs_mean = set(), set(), set()
-                for snap, pnl in pool:
-                    rb = stage_rate_bucket(snap, target_stage)
-                    db = snap.diff_bucket
-                    mb = snap.mean_bucket
-                    tag_rows.append((rb, db, mb, pnl))
-                    obs_rate.add(rb)
-                    obs_diff.add(db)
-                    obs_mean.add(mb)
+                f"[{target_stage}_Δ自证] 非0Δ={cnt_delta_nonzero}({(cnt_delta_nonzero / Entry * 100.0) if Entry else 0.0:.1f}%) | stop缺失={cnt_stop_missing} | stop==final={cnt_stop_eq_final} | Top5={ex_delta}")
+            # Δ自证作废阈值（冻结区锁死）：满足任一条即作废
+            delta_void = False
+            void_reason = ""
+            if Entry > 0:
+                if cnt_stop_missing > 0:
+                    delta_void = True
+                    void_reason = "stop缺失>0"
+                elif cnt_stop_eq_final == Entry:
+                    delta_void = True
+                    void_reason = "stop==final==Entry"
+                elif cnt_delta_nonzero == 0:
+                    delta_void = True
+                    void_reason = "非0Δ==0且Entry>0"
+            cnt_nonzero_delta_eq0 = max(0, Entry - cnt_delta_nonzero)
+            if N == 0:
+                print(f"规则族扫描已跳过：reach_target=0")
+            elif DELTA_AUDIT_ON and delta_void:
+                print(
+                    f"[{target_stage}_Δ作废] ✅ 作废原因={void_reason} | stop缺失={cnt_stop_missing} | stop==final={cnt_stop_eq_final} | 非0Δ==0={cnt_nonzero_delta_eq0}")
+                if DELTA_AUDIT_ENFORCE:
+                    raise RuntimeError(f"Δ作废触发：{void_reason}")
+                print(f"规则族扫描已跳过：Δ作废({void_reason})")
+            else:
+                print(
+                    f"规则族扫描（目标层={target_stage}｜Entry={reach_target}｜MinHit={MIN_HIT}｜扫描=单桶+双桶AND+两单桶OR｜不扫三桶）")
+                if _effective_scan:
+                    # 预计算样本标签
+                    tag_rows = []  # (rate_bucket, diff_bucket, mean_bucket, pnl)
+                    obs_rate, obs_diff = set(), set()
+                    if ENABLE_MEAN_FEATURE:
+                        obs_mean = set()
 
-                single = defaultdict(lambda: [0, 0.0])  # (field,val) -> [cnt,sum]
-                rate_diff = defaultdict(lambda: [0, 0.0])  # (rb,db) -> [cnt,sum]
-                rate_mean = defaultdict(lambda: [0, 0.0])  # (rb,mb) -> [cnt,sum]
-                diff_mean = defaultdict(lambda: [0, 0.0])  # (db,mb) -> [cnt,sum]
+                    for snap, pnl in pool:
+                        rb = stage_rate_bucket(snap, target_stage)
+                        db = snap.diff_bucket
 
-                for rb, db, mb, pnl in tag_rows:
-                    single[("rate", rb)][0] += 1
-                    single[("rate", rb)][1] += pnl
-                    single[("diff", db)][0] += 1
-                    single[("diff", db)][1] += pnl
-                    single[("mean", mb)][0] += 1
-                    single[("mean", mb)][1] += pnl
+                        if ENABLE_MEAN_FEATURE:
+                            mb = snap.mean_bucket
+                            tag_rows.append((rb, db, mb, pnl))
+                            obs_mean.add(mb)
+                        else:
+                            tag_rows.append((rb, db, None, pnl))
 
-                    rate_diff[(rb, db)][0] += 1
-                    rate_diff[(rb, db)][1] += pnl
-                    rate_mean[(rb, mb)][0] += 1
-                    rate_mean[(rb, mb)][1] += pnl
-                    diff_mean[(db, mb)][0] += 1
-                    diff_mean[(db, mb)][1] += pnl
+                        obs_rate.add(rb)
+                        obs_diff.add(db)
 
-                def _cond_str(field: str, val: str) -> str:
-                    if field == "rate":
-                        return f"rate={val}"
-                    if field == "diff":
-                        return f"diff={val}"
-                    if field == "mean":
-                        return f"mean={val}"
-                    return f"{field}={val}"
+                    single = defaultdict(lambda: [0, 0.0])  # (field,val) -> [cnt,sum]
+                    rate_diff = defaultdict(lambda: [0, 0.0])  # (rb,db) -> [cnt,sum]
 
-                def _rule_id_and(parts):
-                    # parts: list of (field,val)
-                    inner = "&".join([_cond_str(f, v) for f, v in parts])
-                    return f"{target_stage}|{inner}"
+                    if ENABLE_MEAN_FEATURE:
+                        rate_mean = defaultdict(lambda: [0, 0.0])  # (rb,mb) -> [cnt,sum]
+                        diff_mean = defaultdict(lambda: [0, 0.0])  # (db,mb) -> [cnt,sum]
 
-                def _rule_id_or(a, b):
-                    sa = _cond_str(a[0], a[1])
-                    sb = _cond_str(b[0], b[1])
-                    return f"{target_stage}|{sa} OR {sb}"
+                    for rb, db, mb, pnl in tag_rows:
+                        single[("rate", rb)][0] += 1
+                        single[("rate", rb)][1] += pnl
+                        single[("diff", db)][0] += 1
+                        single[("diff", db)][1] += pnl
 
-                def _add(rows, kind: str, rule_id: str, hit_cnt: int, sum_pnl: float):
-                    if hit_cnt < MIN_HIT:
-                        return
-                    delta_sum = sum_pnl
-                    delta_avg = delta_sum / Entry
-                    stop_pct = hit_cnt / Entry
-                    rows.append({
-                        "kind": kind,
-                        "rule_id": rule_id,
-                        "hit": hit_cnt,
-                        "stop_pct": stop_pct,
-                        "delta_sum": delta_sum,
-                        "delta_avg": delta_avg,
-                    })
+                        if ENABLE_MEAN_FEATURE:
+                            single[("mean", mb)][0] += 1
+                            single[("mean", mb)][1] += pnl
 
-                rows = []
+                        rate_diff[(rb, db)][0] += 1
+                        rate_diff[(rb, db)][1] += pnl
 
-                # ① 单桶
-                for (field, val), (cnt, s) in single.items():
-                    _add(rows, "SINGLE", f"{target_stage}|{_cond_str(field, val)}", cnt, s)
+                        if ENABLE_MEAN_FEATURE:
+                            rate_mean[(rb, mb)][0] += 1
+                            rate_mean[(rb, mb)][1] += pnl
+                            diff_mean[(db, mb)][0] += 1
+                            diff_mean[(db, mb)][1] += pnl
 
-                # ② 双桶组合（AND）
-                for (rb, db), (cnt, s) in rate_diff.items():
-                    _add(rows, "AND", _rule_id_and([("rate", rb), ("diff", db)]), cnt, s)
-                for (rb, mb), (cnt, s) in rate_mean.items():
-                    _add(rows, "AND", _rule_id_and([("rate", rb), ("mean", mb)]), cnt, s)
-                for (db, mb), (cnt, s) in diff_mean.items():
-                    _add(rows, "AND", _rule_id_and([("diff", db), ("mean", mb)]), cnt, s)
+                    def _cond_str(field: str, val: str) -> str:
+                        if field == "rate":
+                            return f"rate={val}"
+                        if field == "diff":
+                            return f"diff={val}"
+                        if field == "mean":
+                            return f"mean={val}"
+                        return f"{field}={val}"
 
-                # ④ OR 并集（仅两单桶 OR）
-                singles = list(single.keys())  # (field,val)
+                    def _rule_id_and(parts):
+                        # parts: list of (field,val)
+                        inner = "&".join([_cond_str(f, v) for f, v in parts])
+                        return f"{target_stage}|{inner}"
 
-                def _get_single(k):
-                    v = single.get(k)
-                    if not v:
-                        return (0, 0.0)
-                    return v[0], v[1]
+                    def _rule_id_or(a, b):
+                        sa = _cond_str(a[0], a[1])
+                        sb = _cond_str(b[0], b[1])
+                        return f"{target_stage}|{sa} OR {sb}"
 
-                def _get_intersection(a, b):
-                    fa, va = a
-                    fb, vb = b
-                    if fa == fb:
-                        if va == vb:
-                            cnt, s = _get_single(a)
-                            return cnt, s
-                        return 0, 0.0
-                    # rate/diff
-                    if {fa, fb} == {"rate", "diff"}:
-                        r = va if fa == "rate" else vb
-                        d = vb if fb == "diff" else va
-                        cnt, s = rate_diff.get((r, d), (0, 0.0))
-                        return cnt, s
-                    # rate/mean
-                    if {fa, fb} == {"rate", "mean"}:
-                        r = va if fa == "rate" else vb
-                        m = vb if fb == "mean" else va
-                        cnt, s = rate_mean.get((r, m), (0, 0.0))
-                        return cnt, s
-                    # diff/mean
-                    if {fa, fb} == {"diff", "mean"}:
-                        d = va if fa == "diff" else vb
-                        m = vb if fb == "mean" else va
-                        cnt, s = diff_mean.get((d, m), (0, 0.0))
-                        return cnt, s
-                    return 0, 0.0
+                    def _add(rows, kind: str, rule_id: str, hit_cnt: int, sum_pnl: float):
+                        if hit_cnt < MIN_HIT:
+                            return
+                        delta_sum = sum_pnl
+                        delta_avg = delta_sum / Entry
+                        stop_pct = hit_cnt / Entry
+                        rows.append({
+                            "kind": kind,
+                            "rule_id": rule_id,
+                            "hit": hit_cnt,
+                            "stop_pct": stop_pct,
+                            "delta_sum": delta_sum,
+                            "delta_avg": delta_avg,
+                        })
 
-                tautology_or_filtered = 0
+                    rows = []
 
-                def _is_tautology_or(a, b) -> bool:
-                    # a/b 形如 ('diff','6') / ('rate','减速') / ('mean','|均差|<3') 等
-                    try:
+                    # ① 单桶
+                    for (field, val), (cnt, s) in single.items():
+                        _add(rows, "SINGLE", f"{target_stage}|{_cond_str(field, val)}", cnt, s)
+
+                    # ② 双桶组合（AND）
+                    for (rb, db), (cnt, s) in rate_diff.items():
+                        _add(rows, "AND", _rule_id_and([("rate", rb), ("diff", db)]), cnt, s)
+
+                    if ENABLE_MEAN_FEATURE:
+                        for (rb, mb), (cnt, s) in rate_mean.items():
+                            _add(rows, "AND", _rule_id_and([("rate", rb), ("mean", mb)]), cnt, s)
+                        for (db, mb), (cnt, s) in diff_mean.items():
+                            _add(rows, "AND", _rule_id_and([("diff", db), ("mean", mb)]), cnt, s)
+
+                    # ④ OR 并集（仅两单桶 OR）
+                    singles = list(single.keys())  # (field,val)
+
+                    def _get_single(k):
+                        v = single.get(k)
+                        if not v:
+                            return (0, 0.0)
+                        return v[0], v[1]
+
+                    def _get_intersection(a, b):
                         fa, va = a
                         fb, vb = b
-                    except Exception:
-                        return False
-                    if fa != fb:
-                        return False
-                    if fa == "diff":
-                        universe = {str(i) for i in range(0, 10)} | {"9+"}
-                    elif fa == "rate":
-                        universe = {"减速", "加速", "极值", "无效"}
-                    elif fa == "mean":
-                        universe = {"|均差|<3", "|均差|>=3", "mean=0", "无效"}
+                        if fa == fb:
+                            if va == vb:
+                                cnt, s = _get_single(a)
+                                return cnt, s
+                            return 0, 0.0
+                        # rate/diff
+                        if {fa, fb} == {"rate", "diff"}:
+                            r = va if fa == "rate" else vb
+                            d = vb if fb == "diff" else va
+                            cnt, s = rate_diff.get((r, d), (0, 0.0))
+                            return cnt, s
+
+                        if ENABLE_MEAN_FEATURE:
+                            # rate/mean
+                            if {fa, fb} == {"rate", "mean"}:
+                                r = va if fa == "rate" else vb
+                                m = vb if fb == "mean" else va
+                                cnt, s = rate_mean.get((r, m), (0, 0.0))
+                                return cnt, s
+                            # diff/mean
+                            if {fa, fb} == {"diff", "mean"}:
+                                d = va if fa == "diff" else vb
+                                m = vb if fb == "mean" else va
+                                cnt, s = diff_mean.get((d, m), (0, 0.0))
+                                return cnt, s
+
+                        return 0, 0.0
+
+                    tautology_or_filtered = 0
+
+                    def _is_tautology_or(a, b) -> bool:
+                        # a/b 形如 ('diff','6') / ('rate','减速') / ('mean','|均差|<3') 等
+                        try:
+                            fa, va = a
+                            fb, vb = b
+                        except Exception:
+                            return False
+                        if fa != fb:
+                            return False
+                        if fa == "diff":
+                            universe = {str(i) for i in range(0, 10)} | {"9+"}
+                        elif fa == "rate":
+                            universe = {"减速", "加速", "极值", "无效"}
+                        elif fa == "mean":
+                            universe = {"|均差|<3", "|均差|>=3", "mean=0", "无效"}
+                        else:
+                            return False
+                        return {va, vb} == universe
+
+                    for i in range(len(singles)):
+                        for j in range(i + 1, len(singles)):
+                            a = singles[i]
+                            b = singles[j]
+                            if _is_tautology_or(a, b):
+                                tautology_or_filtered += 1
+                                continue
+                            cnt_a, sum_a = _get_single(a)
+                            cnt_b, sum_b = _get_single(b)
+                            cnt_ab, sum_ab = _get_intersection(a, b)
+                            cnt_or = cnt_a + cnt_b - cnt_ab
+                            sum_or = sum_a + sum_b - sum_ab
+                            _add(rows, "OR", _rule_id_or(a, b), cnt_or, sum_or)
+
+                    # 统计输出（A/B/C 三种主排序）
+                    # 退化规则过滤：Stop%过高通常等价“全覆盖停手”，信息量低（开发期先直接过滤）
+                    RULESCAN_DEGEN_STOP_PCT = 0.99
+                    _deg_cnt = 0
+                    if rows:
+                        for _r in rows:
+                            if (_r.get("kind") == "OR") and (_r.get("stop_pct", 0.0) >= RULESCAN_DEGEN_STOP_PCT):
+                                _deg_cnt += 1
+                        if _deg_cnt:
+                            rows = [_r for _r in rows if
+                                    not ((_r.get("kind") == "OR") and (
+                                            _r.get("stop_pct", 0.0) >= RULESCAN_DEGEN_STOP_PCT))]
+                            print(
+                                f"（退化规则已过滤：{_deg_cnt} 条｜阈值 Stop%≥{RULESCAN_DEGEN_STOP_PCT * 100:.1f}%｜恒真OR已过滤：{tautology_or_filtered} 条）")
+
+                    def _fmt_num(x: float, nd=2):
+                        sign = "+" if x >= 0 else ""
+                        return f"{sign}{x:.{nd}f}"
+
+                    def _print_top(title: str, key_fn):
+                        top = sorted(rows, key=key_fn, reverse=True)[:RULESCAN_TOPN]
+                        print("")
+                        print(title)
+                        if not top:
+                            print("（无满足 MinHit 的候选）")
+                            return
+                        for r in top:
+                            print(
+                                f"{r['rule_id']}: Stop%={r['stop_pct'] * 100:.1f}%({r['hit']}/{Entry})，"
+                                f"ΔSum={_fmt_num(r['delta_sum'], 2)}，ΔAvg={_fmt_num(r['delta_avg'], 4)}"
+                            )
+
+                    # 崩溃修复：当无有效规则时，跳过 Top / OOS 报告打印（避免空候选导致索引越界崩溃）
+                    _max_hit = max((r.get("hit", 0) for r in rows), default=0)
+                    if (not rows) or (_max_hit < RULESCAN_MIN_CNT):
+                        print("")
+                        print(f"（无有效规则：rows={len(rows)}，MaxHit={_max_hit}，MinHit={RULESCAN_MIN_CNT}；跳过Top/OOS）")
                     else:
-                        return False
-                    return {va, vb} == universe
-
-                for i in range(len(singles)):
-                    for j in range(i + 1, len(singles)):
-                        a = singles[i]
-                        b = singles[j]
-                        if _is_tautology_or(a, b):
-                            tautology_or_filtered += 1
-                            continue
-                        cnt_a, sum_a = _get_single(a)
-                        cnt_b, sum_b = _get_single(b)
-                        cnt_ab, sum_ab = _get_intersection(a, b)
-                        cnt_or = cnt_a + cnt_b - cnt_ab
-                        sum_or = sum_a + sum_b - sum_ab
-                        _add(rows, "OR", _rule_id_or(a, b), cnt_or, sum_or)
-
-                # 统计输出（A/B/C 三种主排序）
-                # 退化规则过滤：Stop%过高通常等价“全覆盖停手”，信息量低（开发期先直接过滤）
-                RULESCAN_DEGEN_STOP_PCT = 0.99
-                _deg_cnt = 0
-                if rows:
-                    for _r in rows:
-                        if (_r.get("kind") == "OR") and (_r.get("stop_pct", 0.0) >= RULESCAN_DEGEN_STOP_PCT):
-                            _deg_cnt += 1
-                    if _deg_cnt:
-                        rows = [_r for _r in rows if
-                                not ((_r.get("kind") == "OR") and (_r.get("stop_pct", 0.0) >= RULESCAN_DEGEN_STOP_PCT))]
-                        print(
-                            f"（退化规则已过滤：{_deg_cnt} 条｜阈值 Stop%≥{RULESCAN_DEGEN_STOP_PCT * 100:.1f}%｜恒真OR已过滤：{tautology_or_filtered} 条）")
-
-                def _fmt_num(x: float, nd=2):
-                    sign = "+" if x >= 0 else ""
-                    return f"{sign}{x:.{nd}f}"
-
-                def _print_top(title: str, key_fn):
-                    top = sorted(rows, key=key_fn, reverse=True)[:RULESCAN_TOPN]
-                    print("")
-                    print(title)
-                    if not top:
-                        print("（无满足 MinHit 的候选）")
-                        return
-                    for r in top:
-                        print(
-                            f"{r['rule_id']}: Stop%={r['stop_pct'] * 100:.1f}%({r['hit']}/{Entry})，"
-                            f"ΔSum={_fmt_num(r['delta_sum'], 2)}，ΔAvg={_fmt_num(r['delta_avg'], 4)}"
-                        )
-
-                # 崩溃修复：当无有效规则时，跳过 Top / OOS 报告打印（避免空候选导致索引越界崩溃）
-                _max_hit = max((r.get("hit", 0) for r in rows), default=0)
-                if (not rows) or (_max_hit < RULESCAN_MIN_CNT):
-                    print("")
-                    print(f"（无有效规则：rows={len(rows)}，MaxHit={_max_hit}，MinHit={RULESCAN_MIN_CNT}；跳过Top/OOS）")
+                        _print_top("Top（主排序=ΔAvg）", lambda r: r["delta_avg"])
+                        _print_top("Top（主排序=ΔSum）", lambda r: r["delta_sum"])
+                        _print_top("Top（主排序=Stop%）", lambda r: r["stop_pct"])
                 else:
-                    _print_top("Top（主排序=ΔAvg）", lambda r: r["delta_avg"])
-                    _print_top("Top（主排序=ΔSum）", lambda r: r["delta_sum"])
-                    _print_top("Top（主排序=Stop%）", lambda r: r["stop_pct"])
-        # ==================== 投放链路 END ====================
+                    print("规则族扫描=OFF（Node3默认）")
+            # ==================== 投放链路 END ====================
+    else:
+        # Node 1 Goal B: L4 Panel Hidden
+        pass
 
     print("============================================================")
     print("🚀🚀🚀 🍔🍔🍔 🎰🎰🎰")
@@ -3836,251 +4478,273 @@ def _run_report(csv_files, title):
     # --- 核心结果（每次跑必出｜为策略官/写手看结果） ---
     _struct_line, _struct_hash = _get_struct_summary_line_and_hash()
     print(_struct_line)
-    print(f"AnchorMode={STRUCT_ANCHOR_MODE}")
-    print("PreSW=LEADER_AS_TEMP | Tie=KEEP_LAST | Fallback=FIRST_VALID_WINNER | Switch=B1_RESET_TO_STEP1")
-    print("T/0=SHIFT_ONLY_NO_BREAK")
-    _bon, _an, _raw = _get_boot_filter_effective()  # 靴级自证需要，避免未赋值
-    try:
-        _fa = BOOT_FILTER_RULE.get("forbidden_action")
-    except Exception:
-        _fa = "NA"
-        _bon, _an, _raw = _get_boot_filter_effective()
-    print(f"BOOT_FILTER={'ON' if _bon else 'OFF'} + forbidden_action={_fa}")
+
+    if not MINIMAL_CONSOLE_MODE:
+        print(f"AnchorMode={STRUCT_ANCHOR_MODE}")
+        print("PreSW=LEADER_AS_TEMP | Tie=KEEP_LAST | Fallback=FIRST_VALID_WINNER | Switch=B1_RESET_TO_STEP1")
+        print("T/0=SHIFT_ONLY_NO_BREAK")
+        _bon, _an, _raw = _get_boot_filter_effective()  # 靴级自证需要，避免未赋值
+        try:
+            _fa = BOOT_FILTER_RULE.get("forbidden_action")
+        except Exception:
+            _fa = "NA"
+            _bon, _an, _raw = _get_boot_filter_effective()
+        print(f"BOOT_FILTER={'ON' if _bon else 'OFF'} + forbidden_action={_fa}")
+
     _avg_pnl = (total_profit / total_entry) if total_entry else 0.0
     print(f"💶💶💶 单次平均增益: {_avg_pnl:.6f}")
     print(f"💶💶💶 总净值增益  : {total_profit:.2f}")
 
-    # Node 7: UNIT=1248 报表口径输出
-    print("------------------------------------------------------------")
-    print("UNIT=1248 报表口径（Node 7 补丁）")
-    print(f"UNIT_MODE=MARTIN_1248")
-    print(f"PROFIT_TARGET=B (盈利阈值命中)")
-    print(
-        f"UNIT_MODE=... | FAIL_LIMIT_X=4 | HIT_DEF=UNIT_PNL>0 | FAIL_DEF=PNL=-1 only | TIE_SKIP_FAIL=1 | UNIT_START=FIRST_🎯")
+    # Node 1 Goal D: Zero Entry Hard Check（锁死：🎯触发条目=0 视为未跑通/未生效）
+    if total_entry == 0:
+        raise RuntimeError("ENTRY_ZERO_FAIL: 🎯触发条目=0视为未跑通/未生效")
 
-    # Gate 3_A: 可行性判定自证
-    # 检查是否仍为一次性交易
-    # 由于我们无法直接读取 run_strategy_on_boot 内部的逻辑，只能通过 avg_len 判断
-    # 如果 avg_len > 1，说明已经突破了一次性交易限制
-    # 如果 avg_len == 1，说明可能仍受限
-    # 但题目要求打印 GATE3_A 行
-    # 假设我们无法在锚点2内解除一次性交易限制（因为那是 run_strategy_on_boot 的逻辑，在锚点2之外）
-    # 那么 avg_len 必然为 1
-    # 所以我们必须如实打印
+    # Node 1 Goal C: Node Acceptance Line
+    print(f"节点={NODE_TAG} | 结构={_struct_line} | 净值={total_profit:.2f}")
 
-    # 计算平均长度
-    avg_len = (bet_total_cnt / unit_total_cnt) if unit_total_cnt > 0 else 0.0
-
-    can_multi = 1 if avg_len > 1.0 else 0
-    reason = "OK" if can_multi else "ONE_TIME_TRADE_LOCKED"
-    print(f"GATE3_A: can_multi_bet_unit={can_multi} | reason={reason}")
-
-    # Gate 3_B: 二选一
-    if can_multi:
-        # 选项1（可行）
-        pass  # 已在上面打印了 UNIT_LEN_DEBUG 等
-    else:
-        # 选项2（不可行）：正式宣告
-        print("GATE3_B: 1248_chain=UNSUPPORTED_UNDER_ONE_TIME_TRADE")
-        print("GATE3_B: fallback=FIRST_BET_ONLY (unit_len fixed to 1)")
-
-    # Node 7: 打印 DEBUG 自证行
-    print(f"UNIT_LEN_DEBUG: avg_len={avg_len:.2f} | max_len=NA | total_bets={bet_total_cnt} | units={unit_total_cnt}")
-
-    check_end = (unit_profit_hit_cnt + unit_fail_end_cnt == unit_total_cnt)
-    print(
-        f"UNIT_END_DEBUG: hit={unit_profit_hit_cnt} | fail_end={unit_fail_end_cnt} | tie_seen={tie_seen_cnt} | check_end={check_end}")
-
-    print(f"UNIT_DEBUG: created={unit_created_cnt} | UNIT_COUNT={unit_total_cnt}")
-    print(f"FIRST_BET_DEBUG: taken={first_bet_taken_cnt} | FIRST_BET_COUNT={first_bet_total_cnt}")
-    print(f"EVENT_DEBUG: bet_count={bet_total_cnt} | note=UNIT/FIRST_BET must be driven by 🎯 settle event")
-    print(f"UNIT_DEBUG_SUMMARY: hit={unit_profit_hit_cnt} | fail_end={unit_fail_end_cnt} | tie_seen={tie_seen_cnt}")
-
-    unit_hit_rate = (unit_profit_hit_cnt / unit_total_cnt * 100.0) if unit_total_cnt > 0 else 0.0
-    print(f"UNIT_HIT_RATE={unit_hit_rate:.2f}% ({unit_profit_hit_cnt}/{unit_total_cnt})")
-
-    match_rate = (total_match / total_entry * 100.0) if total_entry > 0 else 0.0
-    print(f"MATCH_RATE={match_rate:.2f}% ({total_match}/{total_entry})")
-
-    unit_pnl_avg = (unit_pnl_sum / unit_total_cnt) if unit_total_cnt > 0 else 0.0
-    print(f"UNIT_PNL_SUM={unit_pnl_sum:.2f} | UNIT_PNL_AVG={unit_pnl_avg:.4f}")
-    print(f"UNIT_WORST={unit_worst_pnl:.2f}")
-
-    # BET 层输出
-    bet_win_rate = (bet_win_cnt / bet_total_cnt * 100.0) if bet_total_cnt > 0 else 0.0
-    print(f"BET_COUNT={bet_total_cnt}")
-    print(f"BET_WINRATE={bet_win_rate:.2f}% ({bet_win_cnt}/{bet_total_cnt})")
-    print(f"BET_PNL_SUM={bet_pnl_sum:.2f}")
-
-    # FIRST_BET 层输出
-    first_bet_win_rate = (first_bet_win_cnt / first_bet_total_cnt * 100.0) if first_bet_total_cnt > 0 else 0.0
-    print(f"FIRST_BET_COUNT={first_bet_total_cnt}")
-    print(f"FIRST_BET_WINRATE={first_bet_win_rate:.2f}% ({first_bet_win_cnt}/{first_bet_total_cnt})")
-    print(f"FIRST_BET_PNL_SUM={first_bet_pnl_sum:.2f}")
-
-    # 一致性自证
-    print(f"SINGLE_BET_IDENTITY: FIRST_BET_COUNT==BET_COUNT==reach_target")
-
-    # 抽样自证
-    print("------------------------------------------------------------")
-    print("结算真源自证 (Top 5)")
-    for i, sample in enumerate(bet_audit_samples):
+    # Node 1 Goal C: Minimal Console Mode (Suppress large blocks)
+    if not MINIMAL_CONSOLE_MODE:
+        # Node 7: UNIT=1248 报表口径输出
+        print("------------------------------------------------------------")
+        print("UNIT=1248 报表口径（Node 7 补丁）")
+        print(f"UNIT_MODE=MARTIN_1248")
+        print(f"PROFIT_TARGET=B (盈利阈值命中)")
         print(
-            f"{i + 1}. BET_SIDE={sample['BET_SIDE']} | OUTCOME_SIDE={sample['OUTCOME_SIDE']} | PNL_BY_OUTCOME={sample['PNL_BY_OUTCOME']}")
-    print("------------------------------------------------------------")
+            f"UNIT_MODE=... | FAIL_LIMIT_X=4 | HIT_DEF=UNIT_PNL>0 | FAIL_DEF=PNL=-1 only | TIE_SKIP_FAIL=1 | UNIT_START=FIRST_🎯")
 
-    if AUDIT_RUN:
-        print("扫描方式：一次性扫描｜一次性交易")
-        print("段长口径：禁止跨段累计")
-        print("术语锁死：只承认「⭐ / 投放点」")
-        _print_switches_block("HEADER")
-        # 表头开关自证（锁死）：即使静默模式也必须打印（以下两行保留但改为动态口径）
-        print(f"结构闸门：{STRUCT_SCAN_TEXT}")
-        print(f"靴级开关：{_boot_filter_label()}")
-        _sl, _sh = _get_struct_summary_line_and_hash()
-        print(_sl)
-        print(f"AnchorMode={STRUCT_ANCHOR_MODE}")
-        print("PreSW=LEADER_AS_TEMP | Tie=KEEP_LAST | Fallback=FIRST_VALID_WINNER | Switch=B1_RESET_TO_STEP1")
-        print("T/0=SHIFT_ONLY_NO_BREAK")
+        # Gate 3_A: 可行性判定自证
+        # 检查是否仍为一次性交易
+        # 由于我们无法直接读取 run_strategy_on_boot 内部的逻辑，只能通过 avg_len 判断
+        # 如果 avg_len > 1，说明已经突破了一次性交易限制
+        # 如果 avg_len == 1，说明可能仍受限
+        # 但题目要求打印 GATE3_A 行
+        # 假设我们无法在锚点2内解除一次性交易限制（因为那是 run_strategy_on_boot 的逻辑，在锚点2之外）
+        # 那么 avg_len 必然为 1
+        # 所以我们必须如实打印
+
+        # 计算平均长度
+        avg_len = (bet_total_cnt / unit_total_cnt) if unit_total_cnt > 0 else 0.0
+
+        can_multi = 1 if avg_len > 1.0 else 0
+        reason = "OK" if can_multi else "ONE_TIME_TRADE_LOCKED"
+        print(f"GATE3_A: can_multi_bet_unit={can_multi} | reason={reason}")
+
+        # Gate 3_B: 二选一
+        if can_multi:
+            # 选项1（可行）
+            pass  # 已在上面打印了 UNIT_LEN_DEBUG 等
+        else:
+            # 选项2（不可行）：正式宣告
+            print("GATE3_B: 1248_chain=UNSUPPORTED_UNDER_ONE_TIME_TRADE")
+            print("GATE3_B: fallback=FIRST_BET_ONLY (unit_len fixed to 1)")
+
+        # Node 7: 打印 DEBUG 自证行
         print(
-            f"BOOT_FILTER={'ON' if _get_boot_filter_effective()[0] else 'OFF'} + forbidden_action={BOOT_FILTER_RULE.get('forbidden_action', 'NA')}")
-        global _STRUCT_SUMMARY_PRINTED
-        _STRUCT_SUMMARY_PRINTED = True
-        print(f"监测开关：{'开' if MONITOR_ENABLE else '关'}")
-        print("阈值击穿归因：路径快照（每次实际投放前都快照；含状态 T 后的重复投放；归因只用快照）")
+            f"UNIT_LEN_DEBUG: avg_len={avg_len:.2f} | max_len=NA | total_bets={bet_total_cnt} | units={unit_total_cnt}")
+
+        check_end = (unit_profit_hit_cnt + unit_fail_end_cnt == unit_total_cnt)
+        print(
+            f"UNIT_END_DEBUG: hit={unit_profit_hit_cnt} | fail_end={unit_fail_end_cnt} | tie_seen={tie_seen_cnt} | check_end={check_end}")
+
+        print(f"UNIT_DEBUG: created={unit_created_cnt} | UNIT_COUNT={unit_total_cnt}")
+        print(f"FIRST_BET_DEBUG: taken={first_bet_taken_cnt} | FIRST_BET_COUNT={first_bet_total_cnt}")
+        print(f"EVENT_DEBUG: bet_count={bet_total_cnt} | note=UNIT/FIRST_BET must be driven by 🎯 settle event")
+        print(f"UNIT_DEBUG_SUMMARY: hit={unit_profit_hit_cnt} | fail_end={unit_fail_end_cnt} | tie_seen={tie_seen_cnt}")
+
+        unit_hit_rate = (unit_profit_hit_cnt / unit_total_cnt * 100.0) if unit_total_cnt > 0 else 0.0
+        print(f"UNIT_HIT_RATE={unit_hit_rate:.2f}% ({unit_profit_hit_cnt}/{unit_total_cnt})")
+
+        match_rate = (total_match / total_entry * 100.0) if total_entry > 0 else 0.0
+        print(f"MATCH_RATE={match_rate:.2f}% ({total_match}/{total_entry})")
+
+        unit_pnl_avg = (unit_pnl_sum / unit_total_cnt) if unit_total_cnt > 0 else 0.0
+        print(f"UNIT_PNL_SUM={unit_pnl_sum:.2f} | UNIT_PNL_AVG={unit_pnl_avg:.4f}")
+        print(f"UNIT_WORST={unit_worst_pnl:.2f}")
+
+        # BET 层输出
+        bet_win_rate = (bet_win_cnt / bet_total_cnt * 100.0) if bet_total_cnt > 0 else 0.0
+        print(f"BET_COUNT={bet_total_cnt}")
+        print(f"BET_WINRATE={bet_win_rate:.2f}% ({bet_win_cnt}/{bet_total_cnt})")
+        print(f"BET_PNL_SUM={bet_pnl_sum:.2f}")
+
+        # FIRST_BET 层输出
+        first_bet_win_rate = (first_bet_win_cnt / first_bet_total_cnt * 100.0) if first_bet_total_cnt > 0 else 0.0
+        print(f"FIRST_BET_COUNT={first_bet_total_cnt}")
+        print(f"FIRST_BET_WINRATE={first_bet_win_rate:.2f}% ({first_bet_win_cnt}/{first_bet_total_cnt})")
+        print(f"FIRST_BET_PNL_SUM={first_bet_pnl_sum:.2f}")
+
+        # 一致性自证
+        print(f"SINGLE_BET_IDENTITY: FIRST_BET_COUNT==BET_COUNT==reach_target")
+
+        # 抽样自证
         print("------------------------------------------------------------")
-        print("TOTAL_BOOT       :", total_boots)
+        print("结算真源自证 (Top 5)")
+        for i, sample in enumerate(bet_audit_samples):
+            print(
+                f"{i + 1}. BET_SIDE={sample['BET_SIDE']} | OUTCOME_SIDE={sample['OUTCOME_SIDE']} | PNL_BY_OUTCOME={sample['PNL_BY_OUTCOME']}")
         print("------------------------------------------------------------")
-        print("总批次数    :", total_boots)
-        print("可参与批次数:", playable_boots)
-        print("跳过批次数  :", skipped_boots)
-        print("------------------------------------------------------------")
-        entry_pct = (total_entry / total_boots * 100.0) if total_boots > 0 else 0.0
-        print(f"激活次数    : {total_entry} ({entry_pct:.2f}%)")
-        match_pct = (total_match / total_entry * 100.0) if total_entry > 0 else 0.0
-        mismatch_pct = (total_mismatch / total_entry * 100.0) if total_entry > 0 else 0.0
-        print(f"匹配次数    : {total_match} ({match_pct:.2f}%)")
-        print(f"不匹配次数  : {total_mismatch} ({mismatch_pct:.2f}%)")
 
-        # ==========================
-        # 正值触发自审（时间管理局｜锁死｜在最终汇总打印之前）
-        # ==========================
-        avg_profit = (total_profit / total_entry) if total_entry else 0.0
-        trigger_total = bool(POSITIVE_AUDIT_TRIGGER_TOTAL and total_profit > 0)
-        trigger_avg = bool(POSITIVE_AUDIT_TRIGGER_AVG and avg_profit > 0)
+        if AUDIT_RUN:
+            print("扫描方式：一次性扫描｜一次性交易")
+            print("段长口径：禁止跨段累计")
+            print("术语锁死：只承认「⭐ / 投放点」")
+            _print_switches_block("HEADER")
+            # 表头开关自证（锁死）：即使静默模式也必须打印（以下两行保留但改为动态口径）
+            print(f"结构闸门：{STRUCT_SCAN_TEXT}")
+            print(f"靴级开关：{_boot_filter_label()}")
+            _sl, _sh = _get_struct_summary_line_and_hash()
+            print(_sl)
+            print(f"AnchorMode={STRUCT_ANCHOR_MODE}")
+            print("PreSW=LEADER_AS_TEMP | Tie=KEEP_LAST | Fallback=FIRST_VALID_WINNER | Switch=B1_RESET_TO_STEP1")
+            print("T/0=SHIFT_ONLY_NO_BREAK")
+            print(
+                f"BOOT_FILTER={'ON' if _get_boot_filter_effective()[0] else 'OFF'} + forbidden_action={BOOT_FILTER_RULE.get('forbidden_action', 'NA')}")
+            global _STRUCT_SUMMARY_PRINTED
+            _STRUCT_SUMMARY_PRINTED = True
+            print(f"监测开关：{'开' if MONITOR_ENABLE else '关'}")
+            print("阈值击穿归因：路径快照（每次实际投放前都快照；含状态 T 后的重复投放；归因只用快照）")
+            print("------------------------------------------------------------")
+            print("TOTAL_BOOT       :", total_boots)
+            print("------------------------------------------------------------")
+            print("总批次数    :", total_boots)
+            print("可参与批次数:", playable_boots)
+            print("跳过批次数  :", skipped_boots)
+            print("------------------------------------------------------------")
+            entry_pct = (total_entry / total_boots * 100.0) if total_boots > 0 else 0.0
+            print(f"激活次数    : {total_entry} ({entry_pct:.2f}%)")
+            match_pct = (total_match / total_entry * 100.0) if total_entry > 0 else 0.0
+            mismatch_pct = (total_mismatch / total_entry * 100.0) if total_entry > 0 else 0.0
+            print(f"匹配次数    : {total_match} ({match_pct:.2f}%)")
+            print(f"不匹配次数  : {total_mismatch} ({mismatch_pct:.2f}%)")
 
-        # Stop/Zero（本模板当前未启用，锁死为 0，但仍参与闭环与自审）
-        total_stop = 0
-        total_zero = 0
+            # ==========================
+            # 正值触发自审（时间管理局｜锁死｜在最终汇总打印之前）
+            # ==========================
+            avg_profit = (total_profit / total_entry) if total_entry else 0.0
+            trigger_total = bool(POSITIVE_AUDIT_TRIGGER_TOTAL and total_profit > 0)
+            trigger_avg = bool(POSITIVE_AUDIT_TRIGGER_AVG and avg_profit > 0)
 
-        # 恒等式闭环（锁死）
-        closure_diff = int(total_entry) - int(total_match + total_mismatch + total_exhaustion + total_stop + total_zero)
+            # Stop/Zero（本模板当前未启用，锁死为 0，但仍参与闭环与自审）
+            total_stop = 0
+            total_zero = 0
 
-        final_metrics = {
-            "total_profit": total_profit,
-            "avg_profit": avg_profit,
-            "entry": total_entry,
-            "match": total_match,
-            "mismatch": total_mismatch,
-            "break": total_exhaustion,
-            "stop": total_stop,
-            "zero": total_zero,
-            "bet_in_forbidden_seen": BET_IN_FORBIDDEN_SEEN,
-            "ppbb_mismatch": PPBB_MISMATCH,
-            "ppbb_first_evidence": PPBB_FIRST_EVIDENCE,
-            "trigger_total": trigger_total,
-            "trigger_avg": trigger_avg,
-            "closure_diff": closure_diff,
-        }
+            # 恒等式闭环（锁死）
+            closure_diff = int(total_entry) - int(
+                total_match + total_mismatch + total_exhaustion + total_stop + total_zero)
 
-        if POSITIVE_AUDIT_ENABLE and (trigger_total or trigger_avg):
-            SELF_AUDIT_GATE(final_metrics)
+            final_metrics = {
+                "total_profit": total_profit,
+                "avg_profit": avg_profit,
+                "entry": total_entry,
+                "match": total_match,
+                "mismatch": total_mismatch,
+                "break": total_exhaustion,
+                "stop": total_stop,
+                "zero": total_zero,
+                "bet_in_forbidden_seen": BET_IN_FORBIDDEN_SEEN,
+                "ppbb_mismatch": PPBB_MISMATCH,
+                "ppbb_first_evidence": PPBB_FIRST_EVIDENCE,
+                "trigger_total": trigger_total,
+                "trigger_avg": trigger_avg,
+                "closure_diff": closure_diff,
+            }
 
-        # Node 6: 运行期一致性自检
-        _audit_consistency(final_metrics)
+            if POSITIVE_AUDIT_ENABLE and (trigger_total or trigger_avg):
+                SELF_AUDIT_GATE(final_metrics)
 
-    _abn = []  # 自证异常收集器（修复 NameError）
+            # Node 6: 运行期一致性自检
+            _audit_consistency(final_metrics)
 
-    def _abn0(name, val, expect=0):
-        try:
-            if val != expect:
-                _abn.append((name, val, expect))
-        except Exception:
-            _abn.append((name, 'ERR', expect))
+        _abn = []  # 自证异常收集器（修复 NameError）
 
-    _abn0('STAR_ON_T', STAR_ON_T)
-    _abn0('STAR_DIFF0_AND_R_IN_BP', STAR_DIFF0_AND_R_IN_BP)
-    _abn0('MEAN_MISSING_RAW', MEAN_MISSING_RAW)
-    _abn0('MEAN_PARSE_FAIL', MEAN_PARSE_FAIL)
-    _abn0('MEAN_INVALID_BUG(目标=0)', MEAN_INVALID_BUG)
+        def _abn0(name, val, expect=0):
+            try:
+                if val != expect:
+                    _abn.append((name, val, expect))
+            except Exception:
+                _abn.append((name, 'ERR', expect))
 
-    # RATE 无效：非 0 不算异常；仅在一致性失败时弹出（断言已覆盖，但仍留一行提示）
-    if RATE_INVALID_RAW != RATE_INVALID_BUCKET:
-        _abn.append(('RATE_INVALID_MISMATCH', f'{RATE_INVALID_RAW}!={RATE_INVALID_BUCKET}', 'equal'))
+        _abn0('STAR_ON_T', STAR_ON_T)
+        _abn0('STAR_DIFF0_AND_R_IN_BP', STAR_DIFF0_AND_R_IN_BP)
 
-    if PPBB_MISMATCH != 0:
-        _abn.append(('PPBB_MISMATCH', PPBB_MISMATCH, 0))
+        if ENABLE_MEAN_FEATURE:
+            _abn0('MEAN_MISSING_RAW', MEAN_MISSING_RAW)
+            _abn0('MEAN_PARSE_FAIL', MEAN_PARSE_FAIL)
+            _abn0('MEAN_INVALID_BUG(目标=0)', MEAN_INVALID_BUG)
 
-    if _abn:
-        print('自证异常（仅异常弹出）:')
-        for name, val, exp in _abn:
-            print(f'  {name}: {val} (期望={exp})')
-    if PPBB_FIRST_EVIDENCE is not None:
-        print("  PPBB_FIRST_EVIDENCE:", PPBB_FIRST_EVIDENCE)
+        # RATE 无效：非 0 不算异常；仅在一致性失败时弹出（断言已覆盖，但仍留一行提示）
+        if RATE_INVALID_RAW != RATE_INVALID_BUCKET:
+            _abn.append(('RATE_INVALID_MISMATCH', f'{RATE_INVALID_RAW}!={RATE_INVALID_BUCKET}', 'equal'))
 
-    if cont_agg is not None:
-        print()
-        print("------------------------------------------------------------")
-        print("连段统计（双指标相邻态｜事后汇总）")
-        print("说明：仅基于投放前快照列表（含状态 T 重复投放）；样本量不足不输出。")
-        print("阈值：min_samples=%d｜TopK=%d" % (CONT_MIN_SAMPLES, CONT_TOPK))
+        if PPBB_MISMATCH != 0:
+            _abn.append(('PPBB_MISMATCH', PPBB_MISMATCH, 0))
 
-        _print_top_transitions(
-            "A) (|点差|,rate 监测桶) Overall Top",
-            cont_agg["pair_rate_overall"],
-            CONT_MIN_SAMPLES,
-            CONT_TOPK,
-        )
-        _print_top_transitions(
-            "B) (|点差|,mean 桶) Overall Top",
-            cont_agg["pair_mean_overall"],
-            CONT_MIN_SAMPLES,
-            CONT_TOPK,
-        )
+        if _abn:
+            print('自证异常（仅异常弹出）:')
+            for name, val, exp in _abn:
+                print(f'  {name}: {val} (期望={exp})')
+        if PPBB_FIRST_EVIDENCE is not None:
+            print("  PPBB_FIRST_EVIDENCE:", PPBB_FIRST_EVIDENCE)
 
-        max_bn = min(int(cont_agg.get("max_bet_n_seen", 0) or 0), CONT_MAX_BET_N)
-        for bn in range(2, max_bn + 1):
-            tmp_rate = {}
-            tmp_mean = {}
-            if not isinstance(tmp_rate, dict):
+        if cont_agg is not None:
+            print()
+            print("------------------------------------------------------------")
+            print("连段统计（双指标相邻态｜事后汇总）")
+            print("说明：仅基于投放前快照列表（含状态 T 重复投放）；样本量不足不输出。")
+            print("阈值：min_samples=%d｜TopK=%d" % (CONT_MIN_SAMPLES, CONT_TOPK))
+
+            _print_top_transitions(
+                "A) (|点差|,rate 监测桶) Overall Top",
+                cont_agg["pair_rate_overall"],
+                CONT_MIN_SAMPLES,
+                CONT_TOPK,
+            )
+
+            if ENABLE_MEAN_FEATURE:
+                _print_top_transitions(
+                    "B) (|点差|,mean 桶) Overall Top",
+                    cont_agg["pair_mean_overall"],
+                    CONT_MIN_SAMPLES,
+                    CONT_TOPK,
+                )
+
+            max_bn = min(int(cont_agg.get("max_bet_n_seen", 0) or 0), CONT_MAX_BET_N)
+            for bn in range(2, max_bn + 1):
                 tmp_rate = {}
-            if not isinstance(tmp_mean, dict):
                 tmp_mean = {}
-            for (bn2, a, b), v in cont_agg["pair_rate"].items():
-                if bn2 == bn:
-                    tmp_rate[(a, b)] = v
-            for (bn2, a, b), v in cont_agg["pair_mean"].items():
-                if bn2 == bn:
-                    tmp_mean[(a, b)] = v
+                if not isinstance(tmp_rate, dict):
+                    tmp_rate = {}
+                if not isinstance(tmp_mean, dict):
+                    tmp_mean = {}
+                for (bn2, a, b), v in cont_agg["pair_rate"].items():
+                    if bn2 == bn:
+                        tmp_rate[(a, b)] = v
 
-            _print_top_transitions(
-                f"A) bet_n={bn} (|点差|,rate 监测桶) Top",
-                tmp_rate,
-                CONT_MIN_SAMPLES,
-                min(10, CONT_TOPK),
-            )
-            _print_top_transitions(
-                f"B) bet_n={bn} (|点差|,mean 桶) Top",
-                tmp_mean,
-                CONT_MIN_SAMPLES,
-                min(10, CONT_TOPK),
-            )
+                if ENABLE_MEAN_FEATURE:
+                    for (bn2, a, b), v in cont_agg["pair_mean"].items():
+                        if bn2 == bn:
+                            tmp_mean[(a, b)] = v
 
-    # 物理锁死：必须打印两处开关，否则直接作废
-    if not _PRINTED_SWITCHES_HEADER:
-        raise RuntimeError("❌ 缺失表头开关自证：BOOT_FILTER/STRUCT_SCAN 未打印")
-    if not _PRINTED_SWITCHES_PROOF:
-        raise RuntimeError("❌ 缺失强制自证开关：BOOT_FILTER/STRUCT_SCAN 未打印")
+                _print_top_transitions(
+                    f"A) bet_n={bn} (|点差|,rate 监测桶) Top",
+                    tmp_rate,
+                    CONT_MIN_SAMPLES,
+                    min(10, CONT_TOPK),
+                )
+
+                if ENABLE_MEAN_FEATURE:
+                    _print_top_transitions(
+                        f"B) bet_n={bn} (|点差|,mean 桶) Top",
+                        tmp_mean,
+                        CONT_MIN_SAMPLES,
+                        min(10, CONT_TOPK),
+                    )
+
+        # 物理锁死：必须打印两处开关，否则直接作废
+        if not _PRINTED_SWITCHES_HEADER:
+            raise RuntimeError("❌ 缺失表头开关自证：BOOT_FILTER/STRUCT_SCAN 未打印")
+        if not _PRINTED_SWITCHES_PROOF:
+            raise RuntimeError("❌ 缺失强制自证开关：BOOT_FILTER/STRUCT_SCAN 未打印")
 
 
 # 🍀覆盖锚点002_报告汇总_END
