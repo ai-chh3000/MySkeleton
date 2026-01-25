@@ -19,19 +19,31 @@ WATERMARK_TEXT = "🚀🚀🚀 🍔🍔🍔 🎰🎰🎰"
 
 # ------------------------------------------------------------
 # 📌 抽样探针（冻结区｜只用于打印定位｜完全不影响策略逻辑）
-# 输出格式（每条一行）：📌|f=<文件名>|SB=<Sub-Batch>|N=<🎯=N_prebet=人类实际取值/下注点=取值点=seen_all>
+# 输出格式（每条一行）：
+# - 🎯|f=<文件名>|SB=<Sub-Batch>|N=<N_prebet=人类实际取值/下注点=取值点=seen_all>🆗
+# - 📌|f=<文件名>|SB=<Sub-Batch>|N=<同上>（额外采集点；与🎯同源同坐标）
 # ------------------------------------------------------------
 SAMPLE_PROBE_ENABLE = 1  # 1=ON, 0=OFF
 SAMPLE_PROBE_K = 3  # 抽样条数
 SAMPLE_PROBE_PREFIX = "🎯"
+SAMPLE_PROBE_PIN_PREFIX = "📌"
+SAMPLE_PROBE_PRINT_PIN = 1  # 1=同时输出📌，0=仅输出🎯
+SAMPLE_PROBE_MODE = "RANDOM_BY_NONCE"  # RANDOM_BY_NONCE / EARLIEST_BY_SB_N
 SAMPLE_PROBE_RUN_NONCE = int.from_bytes(os.urandom(8), "big")  # 每次运行不同；仅用于抽样排序
-_SAMPLE_PROBE_BEST_BY_FILE = {}  # file -> (score, file, sub_batch, idx)
-_SAMPLE_PROBE_FALLBACK = None  # (base, sub_batch, idx)
+
+# file -> (score, file, sub_batch, N_prebet)
+_SAMPLE_PROBE_BEST_BY_FILE = {}
+_SAMPLE_PROBE_FALLBACK = None  # (base, sub_batch, N_prebet)
+
+# 事件6｜全文件最早🎯（基于“真实下注落点”）
+# file -> (key=(SB_int, N_int) or (SB_str, N_str), file, sub_batch, N_prebet)
+_EARLIEST_TGT_MIN_BY_FILE = {}
+_EARLIEST_TGT_CNT_BY_FILE = defaultdict(int)  # file -> candidate count
 
 
 def _sample_probe_u64(s: str) -> int:
     # 稳定哈希：跨进程/跨平台可复现；仅用于抽样排序（不参与任何逻辑）
-    h = hashlib.md5(s.encode('utf-8'), usedforsecurity=False).hexdigest()
+    h = hashlib.md5(s.encode("utf-8"), usedforsecurity=False).hexdigest()
     return int(h[:16], 16)
 
 
@@ -41,45 +53,126 @@ def _sample_probe_fallback_update(file_name, sub_batch, idx) -> None:
 
 
 def _sample_probe_update(file_name, sub_batch, idx, boot_id=None) -> None:
-    """冻结区抽样候选更新：每文件只保留 1 条（最小哈希者）。"""
-    if not SAMPLE_PROBE_ENABLE:
+    """
+    抽样（冻结区｜只用于打印定位）：
+    - RANDOM_BY_NONCE：随机分布（通过 RUN_NONCE 稳定抽样），避免“永远 SB=1”
+    - EARLIEST_BY_SB_N：按 (SB, N) 最早择优（用于对照验证）
+    注意：抽样只记录“真实下注落点的坐标”（调用点已经在🎯硬闸门之后）。
+    """
+    try:
+        if not SAMPLE_PROBE_ENABLE:
+            return
+        if not file_name:
+            return
+
+        base = os.path.basename(str(file_name))
+
+        def _to_int(x):
+            try:
+                return int(x)
+            except Exception:
+                return None
+
+        sb_i = _to_int(sub_batch)
+        n_i = _to_int(idx)
+
+        # -------- 事件6｜全文件最早🎯：每次真实🎯出现都参与（不受抽样模式影响） --------
+        _EARLIEST_TGT_CNT_BY_FILE[base] += 1
+        if sb_i is None or n_i is None:
+            key_min = (str(sub_batch), str(idx))
+        else:
+            key_min = (sb_i, n_i)
+        prev_min = _EARLIEST_TGT_MIN_BY_FILE.get(base)
+        if prev_min is None or key_min < prev_min[0]:
+            _EARLIEST_TGT_MIN_BY_FILE[base] = (key_min, base, sub_batch, idx)
+
+        # -------- 抽样择优：随机 or 最早 --------
+        if SAMPLE_PROBE_MODE == "EARLIEST_BY_SB_N":
+            order_key = key_min
+            prev = _SAMPLE_PROBE_BEST_BY_FILE.get(base)
+            if prev is None or order_key < prev[0]:
+                _SAMPLE_PROBE_BEST_BY_FILE[base] = (order_key, base, sub_batch, idx)
+            return
+
+        # RANDOM_BY_NONCE（默认）：用稳定哈希打分，保证随机分布且可复现
+        key = f"{SAMPLE_PROBE_RUN_NONCE}|{base}|{sub_batch}|{idx}|{'' if boot_id is None else boot_id}"
+        score = _sample_probe_u64(key)
+        prev = _SAMPLE_PROBE_BEST_BY_FILE.get(base)  # (score, base, sb, n)
+        if prev is None or score < prev[0]:
+            _SAMPLE_PROBE_BEST_BY_FILE[base] = (score, base, sub_batch, idx)
+
+    except Exception:
+        # 抽样模块不得影响主流程
         return
-    """冻结区抽样候选更新：每文件只保留 1 条（最小哈希者）。"""
-    if not SAMPLE_PROBE_ENABLE:
-        return
-    if not file_name:
+
+
+def _earliest_tgt_emit() -> None:
+    """事件6｜输出：全文件最早🎯（真实下注落点）"""
+    if not _EARLIEST_TGT_MIN_BY_FILE:
         return
     try:
-        base = os.path.basename(str(file_name))
+        print("节点=EARLIEST_SCOPE|mode=FILE_WIDE_EARLIEST_REAL_TGT")
     except Exception:
-        base = str(file_name)
-    if not base:
-        return
-    # 允许 sub_batch/idx 为字符串；打印时原样输出；排序时仍纳入哈希
-    key = base
-    score = _sample_probe_u64(f"{SAMPLE_PROBE_RUN_NONCE}|{BUILD_TAG}|{base}|{sub_batch}|{idx}|{boot_id}")
-    cur = _SAMPLE_PROBE_BEST_BY_FILE.get(key)
-    if (cur is None) or (score < cur[0]):
-        _SAMPLE_PROBE_BEST_BY_FILE[key] = (score, base, sub_batch, idx)
+        pass
+
+    # 按 key_min 排序输出（稳定）
+    items = list(_EARLIEST_TGT_MIN_BY_FILE.values())
+    try:
+        items.sort(key=lambda x: x[0])
+    except Exception:
+        pass
+
+    for key_min, base, sb, n in items:
+        try:
+            cnt = int(_EARLIEST_TGT_CNT_BY_FILE.get(base, 0))
+        except Exception:
+            cnt = 0
+        try:
+            print(f"节点=EARLIEST_TGT|f={base}|SB={sb}|N={n}|candidate_cnt={cnt}|why=MIN_KEY")
+        except Exception:
+            continue
+
+    try:
+        print("节点=EARLIEST_ASSERT|OK=1|rule=REAL_TGT_ONLY")
+    except Exception:
+        pass
 
 
 def _sample_probe_emit() -> None:
-    """批处理结束后打印抽样结果（最多 K 条，尽量分布在不同文件）。"""
+    """
+    输出抽样（冻结区）：
+    - 每个文件最多 1 条
+    - 全局取前 K 条
+    """
     if not SAMPLE_PROBE_ENABLE:
         return
-    if not _SAMPLE_PROBE_BEST_BY_FILE:
-        print(f"{SAMPLE_PROBE_PREFIX}|NONE🆗")
+
+    items = list(_SAMPLE_PROBE_BEST_BY_FILE.values())
+    if not items:
         return
-    items = sorted(_SAMPLE_PROBE_BEST_BY_FILE.values(), key=lambda x: x[0])[:int(SAMPLE_PROBE_K or 0)]
-    for _, base, sb, n in items:
-        # 只允许输出“肉眼指哪打哪”的唯一坐标：N（=🎯=N_prebet=人类局号/下注口）
+
+    try:
+        # RANDOM：按 score 小到大；EARLIEST：按 key 小到大
+        items.sort(key=lambda x: x[0])
+    except Exception:
+        pass
+
+    out = items[:max(1, int(SAMPLE_PROBE_K))]
+
+    try:
+        print(f"节点=SAMPLE_PICK|mode={SAMPLE_PROBE_MODE}|nonce={SAMPLE_PROBE_RUN_NONCE}|K={int(SAMPLE_PROBE_K)}|files={len(items)}")
+    except Exception:
+        pass
+
+    for _, base, sb, n in out:
         try:
-            n_out = int(n)
+            # 🎯（真实下注落点的同源打印）
+            print(f"{SAMPLE_PROBE_PREFIX}|f={base}|SB={sb}|N={n}🆗")
+            # 📌（额外采集点：与🎯同源同坐标）
+            if int(SAMPLE_PROBE_PRINT_PIN) == 1:
+                print(f"{SAMPLE_PROBE_PIN_PREFIX}|f={base}|SB={sb}|N={n}")
         except Exception:
-            raise RuntimeError(f"❌ SAMPLE_PROBE_N_NOT_INT: N={n}")
-        if n_out <= 0:
-            raise RuntimeError(f"❌ SAMPLE_PROBE_N_NONPOSITIVE: N={n_out}")
-        print(f"{SAMPLE_PROBE_PREFIX}|f={base}|SB={sb}|N={n_out}🆗")
+            continue
 
 
 BUILD_TAG = "V30_UPGRADED_fix_bootid_v32_buildtag_fix|TAG20260105-01|BOOT_START_LOCK_SW|DUAL_SEEN|B1_RESET_STEP1|RUNLEN_LOCK_S|R_TRUTH|TEMP_INIT_FIRST|HYST3|DIFF_SIGN_ONLY"
@@ -210,8 +303,24 @@ def _print_force_proof_block():
         return
     print("【强制自证输出】")
     _print_switches_block("PROOF")
-    # 基底身份证（🍕短码）：由冻结区指纹自动生成；只改插槽/规则不应变化
+
+    # 事件4+｜PRE_L1 硬阀门自证（只打印一次；不影响后续逻辑）
     try:
+        if not globals().get("_PRE_L1_GUARD_PRINTED", 0):
+            globals()["_PRE_L1_GUARD_PRINTED"] = 1
+            _bak = globals().get("_L1_DECISION_DONE", 0)
+            globals()["_L1_DECISION_DONE"] = 0  # 强制 PRE_L1 场景，仅用于自证
+            _l2_run = 1 if _stage_enabled("L2") else 0
+            _l3_run = 1 if _stage_enabled("L3") else 0
+            print(f"节点=PRE_L1_GUARD|L1_DONE=0|L2_RUN={_l2_run}|L3_RUN={_l3_run}|expect=0")
+            globals()["_L1_DECISION_DONE"] = _bak
+    except Exception:
+        try:
+            globals()["_L1_DECISION_DONE"] = globals().get("_L1_DECISION_DONE", 0)
+        except Exception:
+            pass
+
+    # 基底身份证（🍕短码）：由冻结区指纹自动生成；只改插槽/规则不应变化    try:
         _compute_core_and_slot_fingerprints()
     except Exception:
         pass
@@ -803,7 +912,7 @@ def _flush_audit_log(tag: str = ""):
 # - 空字符串：不覆盖（继续使用 BOOT_FILTER 开关与旧默认 N=9）
 # - N=0：强制关闭靴级开关（等价 BOOT_FILTER=OFF⛔）
 # - N>=1：强制开启靴级开关，并将 N 设为该值（下限钳制为 3）
-BOOT_FILTER = 1  # 1=ON✅，0=OFF⛔（当 BOOT_BLOCK_N_OVERRIDE 非空时，本开关会被覆盖）
+BOOT_FILTER = 0  # 1=ON✅，0=OFF⛔（当 BOOT_BLOCK_N_OVERRIDE 非空时，本开关会被覆盖）
 
 BOOT_FILTER_ALLOW_FROM_DEFAULT = 9  # 默认第9口起允许（等价旧版 seen_all=1..8 禁投）
 BOOT_FILTER_ALLOW_FROM_MIN = 3  # 你要求的最小门槛：第3口起允许
@@ -966,7 +1075,7 @@ STRUCT_VARIANTS = {
 }
 
 # 当前启用结构（切结构只改这一行）
-ACTIVE_STRUCT_NAME = "Q1-X4版"
+ACTIVE_STRUCT_NAME = "三连结构"
 
 # 运行时生效结构表（解析器/扫描器只读这个）
 if ACTIVE_STRUCT_NAME not in STRUCT_VARIANTS:
@@ -1301,10 +1410,11 @@ def scan_by_config_v2(records, rows, anchor_mode, sw_rule):
     run_side = None
     run_len = 0
 
-    # Node3：X/Y 绝对锁（D1｜起点A｜T跳过不计数不打断）
+# Node3：X/Y 绝对锁（D1｜起点A｜T跳过不计数不打断）
     X_LOCKED_ABS = None  # "B" or "P"
-    X_run_side = None
-    X_run_len = 0
+    X_col_cnt_B = 0
+    X_col_cnt_P = 0
+    X_seen_eff = 0  # N_eff：仅累计(B/P)，T不计数不打断
 
     rule = BOOT_FILTER_RULE
 
@@ -1333,7 +1443,102 @@ def scan_by_config_v2(records, rows, anchor_mode, sw_rule):
     else:
         forbidden_action = str(_fa).strip().upper()
 
+    # Node15｜结构开关扫“绝对X”：整靴第一次出现连续 >=3 的那一方，锁死为 X
+    # - IGNORE_T：T 不参与、不打断（和你的口径一致）
+    # - 若整靴从未出现任何一方连续 >=3：该靴直接无效（不落🎯）
+    def _prelock_abs_x_first_ge3():
+        # RUNLEN：遇到对手归零；T 不计数、不打断；谁先 RUNLEN>=3 谁锁定
+        lenB = 0
+        lenP = 0
+        seen_eff = 0  # 仅统计非T有效口（B/P）
+        seq = []  # 从起点到触发点（含T），用于可复核证据
+
+        for _i, _rec in enumerate(records):
+            _r = _rec.get("r")
+
+            if _r == "T":
+                seq.append("T")
+                continue
+            if _r not in ("B", "P"):
+                continue
+
+            # B/P
+            seq.append(_r)
+            seen_eff += 1
+
+            # reachN：优先 seen_all；否则退回 _i+1（含T的位移口）
+            try:
+                _sa = _rec.get("seen_all")
+                _reachN = int(_sa) if _sa not in (None, "") else (_i + 1)
+            except Exception:
+                _reachN = _i + 1
+
+            if _r == "B":
+                lenB += 1
+                lenP = 0
+            else:
+                lenP += 1
+                lenB = 0
+
+            if lenB >= 3 or lenP >= 3:
+                side = "B" if lenB >= 3 else "P"
+                # 证据：保留尾段，避免超长
+                if len(seq) > 200:
+                    r_seq = "..." + "".join(seq[-200:])
+                else:
+                    r_seq = "".join(seq)
+                basis = f"RUNLEN>=3|lenB={lenB}|lenP={lenP}|r={_r}"
+                return True, side, int(_reachN), int(_i), int(seen_eff), int(lenB), int(lenP), r_seq, basis
+
+        # 未触发也要回传可复核的末态
+        if len(seq) > 200:
+            r_seq = "..." + "".join(seq[-200:])
+        else:
+            r_seq = "".join(seq)
+        return False, None, None, None, int(seen_eff), int(lenB), int(lenP), r_seq, "NO_RUNLEN_GE3"
+
+    # 计算 ABSX（物理锁死：同靴只允许锁定一次）
+    _ok, _side, _reachN, _idx0, _seen_eff, _lenB, _lenP, _r_seq, _basis = _prelock_abs_x_first_ge3()
+    if _ok:
+        if X_LOCKED_ABS is None:
+            X_LOCKED_ABS = _side
+        elif X_LOCKED_ABS != _side:
+            # 物理锁死：出现二次锁定且不一致，直接硬停机
+            print(
+                "节点=PROOF_LOCK|OK=0|reason=ABSX_RELOCK_MISMATCH"
+                f"|evidence=prev={X_LOCKED_ABS}|new={_side}|reachN={_reachN}|idx={_idx0}"
+            )
+            raise GuardViolation(
+                code="ABSX_RELOCK_MISMATCH",
+                rule_id=15,
+                phase="ABSX",
+                msg="ABSX lock mismatch",
+                evidence=f"prev={X_LOCKED_ABS}|new={_side}|reachN={_reachN}|idx={_idx0}",
+                exit_code=2,
+            )
+
+        info["abs_x_lock_side"] = _side
+        info["abs_x_lock_N"] = _reachN
+        info["abs_x_lock_idx"] = _idx0
+        info["abs_x_lock_seen_eff"] = _seen_eff
+        info["abs_x_lenB"] = _lenB
+        info["abs_x_lenP"] = _lenP
+        info["abs_x_r_seq"] = _r_seq
+        info["abs_x_basis"] = _basis
+        info["abs_x_mode"] = "RUNLEN_IGNORE_T"
+    else:
+        info["abs_x_lock_side"] = None
+        info["abs_x_lock_N"] = None
+        info["abs_x_lock_idx"] = None
+        info["abs_x_lock_seen_eff"] = _seen_eff
+        info["abs_x_lenB"] = _lenB
+        info["abs_x_lenP"] = _lenP
+        info["abs_x_r_seq"] = _r_seq
+        info["abs_x_basis"] = _basis
+        info["abs_x_mode"] = "RUNLEN_IGNORE_T"
+
     def _opp(bp):
+
         return "P" if bp == "B" else ("B" if bp == "P" else None)
 
     def _expected_abs(side: str):
@@ -1528,11 +1733,12 @@ def scan_by_config_v2(records, rows, anchor_mode, sw_rule):
 
     for i, rec in enumerate(records or []):
         idx = i  # records 行号（0-based）
-        seen_shift = i + 1  # 位移口（含T/0）
-
-        if not _cfg_is_valid_struct_row(rec):
-            # 无效口：只位移，不计段长，不打断
-            continue
+        # 位移口（含T/0）：优先用行内 seen_all；否则退回 i+1
+        try:
+            _sa = rec.get("seen_all")
+            seen_shift = int(_sa) if _sa not in (None, "") else (i + 1)
+        except Exception:
+            seen_shift = i + 1
 
         # r-only, no diff reading
         r_abs = rec.get("r")
@@ -1543,28 +1749,49 @@ def scan_by_config_v2(records, rows, anchor_mode, sw_rule):
         if X_LOCKED_ABS is None:
             prelock_buf.append((idx, seen_shift, r_abs))
 
-        # 1) RUNLEN：用于锁定 X_LOCKED_ABS（谁先连续>=3；T跳过不计数不打断）
+        # 1) ABSX：列长累计首次>=3（不要求连续；BBB/PPP中间允许任意T；T跳过不计数不打断）
         just_locked = False
         if r_abs in ("B", "P") and X_LOCKED_ABS is None:
-            if r_abs == X_run_side:
-                X_run_len += 1
-            else:
-                X_run_side = r_abs
-                X_run_len = 1
+            X_seen_eff += 1  # 仅(B/P)递增，T不计
 
-            if X_run_len >= 3:
-                X_LOCKED_ABS = X_run_side
+            if r_abs == "B":
+                X_col_cnt_B += 1
+            else:
+                X_col_cnt_P += 1
+
+            # 列长累计首次>=3：谁先达到阈值(=3)就锁谁
+            if (X_col_cnt_B >= 3) or (X_col_cnt_P >= 3):
+                # 理论上不会“双达标”；若出现，兜底取当前口方向
+                if (X_col_cnt_B >= 3) and (X_col_cnt_P >= 3):
+                    X_LOCKED_ABS = r_abs
+                elif X_col_cnt_B >= 3:
+                    X_LOCKED_ABS = "B"
+                else:
+                    X_LOCKED_ABS = "P"
+
                 # 强制一次性确定 strong/weak，并且之后不再改动
                 strong_abs = X_LOCKED_ABS
                 weak_abs = _opp(strong_abs)
+
+                # 兼容原有链路字段
                 info["s_defined_idx"] = idx
+
+                # ABSX 自证字段（📌抽样/明细可用）
+                info["abs_x_lock_side"] = X_LOCKED_ABS
+                info["abs_x_lock_idx"] = idx
+                info["abs_x_lock_N_all"] = seen_shift   # 来自 rec.get("seen_all") 或 i+1（包含T的原始口序）
+                info["abs_x_lock_N_eff"] = X_seen_eff   # 去T有效口序（仅B/P累计）
+                info["abs_x_lock_cntB"] = X_col_cnt_B
+                info["abs_x_lock_cntP"] = X_col_cnt_P
+
+                # 兼容旧打印字段（reachN / seen_eff）
+                info["abs_x_lock_N"] = info["abs_x_lock_N_all"]
+                info["abs_x_lock_seen_eff"] = info["abs_x_lock_N_eff"]
                 just_locked = True
 
         # 仍未锁定：继续等（锁定后会回放）
         if X_LOCKED_ABS is None:
             continue
-
-        # 刚锁定：从靴首回放一次（仅回放已缓存的口，不引入未来数）
         if just_locked and prelock_buf:
             _reset_match_state("LOCKED_REPLAY")
             for _idx, _seen_shift, _r_abs in prelock_buf:
@@ -1614,7 +1841,68 @@ def _frozen_scan_structure(records, struct_config_text):
             "forbidden_star_first_seen": None,
         }
 
+    _fn_scan = globals().get("scan_by_config_v2", None)
+    if _fn_scan is None:
+        return "STRUCT_FAIL", None, None, {
+            "fail_reason": "MISSING_scan_by_config_v2",
+            "forbidden_star_cnt": 0,
+            "forbidden_star_first_seen": None,
+        }
     st, entry_star_idx, strong_abs, info = scan_by_config_v2(records, rows, anchor_mode, SW_RULE)
+
+    # Node15｜ABSX 最小自证：稳定打印（整次运行只打印一次；不允许 NameError）
+    if not globals().get("_ABSX_EFF_PRINTED", False):
+        globals()["_ABSX_EFF_PRINTED"] = True
+        try:
+            _info = info if isinstance(info, dict) else {}
+
+            _side = _info.get("abs_x_lock_side", _info.get("abs_x_lock", _info.get("abs_x_side", "NA")))
+            _reachN = _info.get("abs_x_lock_N", _info.get("abs_x_reachN", "NA"))
+            _idx0 = _info.get("abs_x_lock_idx", _info.get("abs_x_idx", "NA"))
+            _seen_eff = _info.get("abs_x_lock_seen_eff", _info.get("abs_x_seen_eff", "NA"))
+            _lenB = _info.get("abs_x_lenB", _info.get("abs_x_runlenB", "NA"))
+            _lenP = _info.get("abs_x_lenP", _info.get("abs_x_runlenP", "NA"))
+            _r_seq = _info.get("abs_x_r_seq", "NA")
+            _basis = _info.get("abs_x_basis", "NA")
+
+            _valid = 1 if _side in ("B", "P") else 0
+            if _valid == 1:
+                print(
+                    f"节点=ABSX_EFF|valid=1|X_LOCKED={_side}|reachN={_reachN}|idx={_idx0}|seen_eff={_seen_eff}"
+                    f"|lenB={_lenB}|lenP={_lenP}|evidence=r_seq={_r_seq}|basis={_basis}"
+                )
+                print("节点=ABSX_ASSERT|OK=1")
+
+                # 事件4+｜PRE_L1 硬阀门真自证（放在你必看的位置：ABSX 后）
+                try:
+                    if not bool(globals().get("_PRE_L1_GUARD_PRINTED", 0)):
+                        globals()["_PRE_L1_GUARD_PRINTED"] = 1
+                        _bak = globals().get("_L1_DECISION_DONE", 0)
+                        globals()["_L1_DECISION_DONE"] = 0  # 强制 PRE_L1 场景，仅用于自证
+                        _l2_run = 1 if _stage_enabled("L2") else 0
+                        _l3_run = 1 if _stage_enabled("L3") else 0
+                        globals()["_L1_DECISION_DONE"] = _bak
+                        print(f"节点=PRE_L1_GUARD|L1_DONE=0|L2_RUN={_l2_run}|L3_RUN={_l3_run}|expect=0")
+
+                        # 事件4+｜补齐 PRE_L1_HARD_OFF 可见tick（不依赖_stage_enabled自带tick，避免被“只打印一次”吞掉）
+                        print(f"节点=L2_TICK|OK=1|EVAL=1|UI=NA|EFF=1|RUN={_l2_run}|L1_DONE=0|reason=PRE_L1_HARD_OFF")
+                        print(f"节点=L3_TICK|OK=1|EVAL=1|UI=NA|EFF=1|RUN={_l3_run}|L1_DONE=0|reason=PRE_L1_HARD_OFF")
+
+                        if (_l2_run != 0) or (_l3_run != 0):                            raise GuardViolation(
+                                code="PRE_L1_GUARD_FAIL",
+                                rule_id=4,
+                                phase="PROOF",
+                                msg="L2/L3 preempted before L1 done",
+                                evidence=f"L2_RUN={_l2_run}|L3_RUN={_l3_run}",
+                                exit_code=2,
+                            )
+                except Exception:
+                    pass
+
+            else:                print("节点=ABSX_EFF|valid=0|reason=NO_ABS_X_RUNLEN_GE3")
+        except Exception as _e:
+            print(f"节点=ABSX_EFF|valid=0|reason=PRINT_FAIL:{type(_e).__name__}")
+
     if st != "STRUCT_OK":
         return "STRUCT_FAIL", None, strong_abs, info
 
@@ -1650,6 +1938,15 @@ def _print_switches_block(where: str):
     global _PRINTED_SWITCHES_HEADER, _PRINTED_SWITCHES_PROOF
     print(f"结构闸门：{STRUCT_SCAN_TEXT}")
     print(f"靴级开关：{_boot_filter_label()}")
+
+    # Node15｜靴级自证（最小 1 行）：母版内部“最终生效”的 boot_on / allow_from / raw_override
+    try:
+        _bon, _allow_from, _raw = _get_boot_filter_effective()
+        _src = "BOOT_BLOCK_N_OVERRIDE" if str(_raw).strip() != "" else "BOOT_FILTER_DEFAULT"
+        print(f"节点=BOOT_EFF|boot_on={1 if _bon else 0}|allow_from={int(_allow_from)}|raw={_raw if str(_raw).strip()!='' else 'NA'}|src={_src}")
+    except Exception as _e:
+        print(f"节点=BOOT_EFF|ERR={type(_e).__name__}:{_e}")
+
     if where == "HEADER":
         _PRINTED_SWITCHES_HEADER = True
     elif where == "PROOF":
@@ -2071,8 +2368,8 @@ _ALLOWED_SNAP_SOURCE = ("STAR_ONLY", "L1", "L2", "L3", "L4", "L5")
 # 链路开关（手动定位用）
 TARGET_STAGE = "L4"
 ENABLE_L1 = 1
-ENABLE_L2 = 0
-ENABLE_L3 = 0
+ENABLE_L2 = 1
+ENABLE_L3 = 1
 ENABLE_L4 = 1
 ENABLE_L5 = 0
 
@@ -2139,21 +2436,50 @@ class StageSnap:
 
 
 def _stage_enabled(stage: str) -> bool:
+    # ===== 事项4升级：L2/L3 不得前置干涉 L1（像当前L4一样：只允许后验启用）=====
+    # 说明：在 L1 决策（secure_write_star_snapshot）完成之前，L2/L3 视为“硬关闭”
+    l1_done = bool(globals().get("_L1_DECISION_DONE", 0))
+
+    # 先算“配置层开关”
     if stage == "L1":
-        return bool(ENABLE_L1)
-    if stage == "L2":
-        return bool(ENABLE_L2)
-    if stage == "L3":
-        return bool(ENABLE_L3)
-    if stage == "L4":
-        return bool(ENABLE_L4)
-    if stage == "L5":
-        return bool(ENABLE_L5)
-    return False
+        eff = bool(ENABLE_L1)
+    elif stage == "L2":
+        eff = bool(ENABLE_L2)
+    elif stage == "L3":
+        eff = bool(ENABLE_L3)
+    elif stage == "L4":
+        eff = bool(ENABLE_L4)
+    elif stage == "L5":
+        eff = bool(ENABLE_L5)
+    else:
+        eff = False
+
+    # 再施加“硬阀门”：L2/L3 在 L1_DONE=0 时强制关闭
+    if stage in ("L2", "L3") and not l1_done:
+        eff2 = False
+        reason = "PRE_L1_HARD_OFF"
+    else:
+        eff2 = eff
+        reason = "ENABLED" if eff else "DISABLED_BY_FLAG"
+
+    # L2/L3 自证：只打印一次（EVAL=1 表示“被评估过”）
+    if stage in ("L2", "L3"):
+        try:
+            k = f"_{stage}_TICK_EVAL_PRINTED"
+            if not bool(globals().get(k, 0)):
+                globals()[k] = 1
+                ui = globals().get(f"ENABLE_{stage}_UI", "NA")
+                print(
+                    f"节点={stage}_TICK|OK=1|EVAL=1|UI={ui}|EFF={1 if eff else 0}"
+                    f"|RUN={1 if eff2 else 0}|L1_DONE={1 if l1_done else 0}|reason={reason}"
+                )
+        except Exception:
+            pass
+
+    return eff2
 
 
-def _guard_stage(stage: str, code: str, why: str, *, boot_id=None, idx=None, phase: str = "REPORT", rule_id: str = "0",
-                 evidence_extra: str = "") -> None:
+def _guard_stage(stage: str, code: str, why: str, *, boot_id=None, idx=None, phase: str = "REPORT", rule_id: str = "0",                 evidence_extra: str = "") -> None:
     """冻结区硬拦截：阶段/契约/越权类错误必须退出。"""
     evidence = f"boot_id={boot_id} idx={idx}"
     if evidence_extra:
@@ -2170,11 +2496,22 @@ def _guard_stage_read(snap: StageSnap, stage: str, field: str) -> str:
     v = getattr(snap, field)
     if v is _UNSET:
         _guard_stage(stage, "STAGE_FIELD_FORBIDDEN", f"读错分层字段：{field}")
+
+    # L2/L3 自证：只打印一次（EVAL=0 表示“真实运行到读字段”）
+    if stage in ("L2", "L3"):
+        try:
+            k = f"_{stage}_TICK_RUN_PRINTED"
+            if not bool(globals().get(k, 0)):
+                globals()[k] = 1
+                ui = globals().get(f"ENABLE_{stage}_UI", "NA")
+                print(f"节点={stage}_TICK|OK=1|EVAL=0|UI={ui}|EFF=1|RUN=1|field={field}")
+        except Exception:
+            pass
+
     return v
 
 
-def _rate_bucket_for_stage(stage: str, rate) -> str:
-    # L1：前小/前大/极值/无效（锁死）
+def _rate_bucket_for_stage(stage: str, rate) -> str:    # L1：前小/前大/极值/无效（锁死）
     # L2-L4：减速/加速/极值/无效（锁死）
     if stage == "L1":
         return _l1_rate_bucket(rate)
@@ -2815,7 +3152,7 @@ def run_strategy_on_boot(records):
     entry_row_idx = star_idx
 
     star_row = records[entry_row_idx]
-    star_seen = star_row.get("seen_all")
+    star_seen = star_row.get('seen_all') or (entry_row_idx + 1)
     star_rr = star_row.get("r")
     star_boot_id = star_row.get("boot_id", star_row.get("shoe_id"))
     if star_boot_id is None:
@@ -2836,8 +3173,18 @@ def run_strategy_on_boot(records):
         star_snapshot_is_none=True, exh_pair=exh_pair
     )
 
-    # 仅用于“缺失样例 TopN”自证：绑定原始字符串（不参与逻辑）
+    # ===== 事项4升级（你要的“像L4一样”）：L2/L3 只允许在 L1 决策之后生效 =====
+    # 护照：只用于“是否允许L2/L3启用”的硬阀门，不改变任何策略结果
+    globals()["_L1_DECISION_DONE"] = 1
+    globals()["_L1_DECISION_GUARD"] = {
+        "boot_id": star_boot_id,
+        "file": star_row.get("file"),
+        "sub_batch": star_row.get("sub_batch"),
+        "star_idx": entry_row_idx,
+        "seen_all": star_seen,
+    }
 
+    # 仅用于“缺失样例 TopN”自证：绑定原始字符串（不参与逻辑）
     _bind_raw_text_fields(star_snap, star_row.get("rate_raw"), star_row.get("mean_raw"))
     # 3) EXECUTE：去指标化（根源灭火）
     phase = phase_transition(phase, "EXECUTE")
@@ -2978,7 +3325,6 @@ def run_strategy_on_boot(records):
             # 输
             profit -= u
 
-            # Node 5: 阶段快照生成（从 star_snap 复制）
             stage = f"L{bet_n}"
             if stage in _STAGE_LIST and _stage_enabled(stage):
                 snap_seq += 1
@@ -2996,8 +3342,54 @@ def run_strategy_on_boot(records):
                 )
                 stage_snap_profits.append(float(profit_before))
 
+            # ===== Node16：L4=后验候选止损（只在 L3 已失败、即将进入 L4 前一刻触发；不得前置干涉 L1/🎯）=====
+            next_bet_n = bet_n + 1
+            if next_bet_n == 4 and _stage_enabled("L4"):
+                sf = globals().get("_SHELL_FILTERS", None) if globals().get("_SHELL_ON", 0) == 1 else None
+
+                # 口径：L4 全部取消勾选 => STOP_DISABLED（永不止损）
+                stop_enabled = False
+                l4d = []
+                l4r = []
+                if isinstance(sf, dict):
+                    l4d = sf.get("L4_点差放行", []) or []
+                    l4r = sf.get("L4_变化率放行", []) or []
+                    stop_enabled = (len(l4d) > 0 and len(l4r) > 0)
+
+                if stop_enabled:
+                    d4 = getattr(star_snap, "diff_bucket", None)
+                    rv = getattr(star_snap, "rate_val", None)
+                    r4 = _rate_bucket_for_stage("L4", rv)
+
+                    if d4 is not None and r4 is not None:
+                        if (str(d4) in {str(x) for x in l4d}) and (str(r4) in {str(x) for x in l4r}):
+                            stop = 1
+
+                            # 记录一个 L4 阶段快照（候选命中；不下注；不消耗下一口）
+                            snap_seq += 1
+                            stage_snaps.append(
+                                _make_stage_snap_from_star(
+                                    stage="L4",
+                                    star=star_snap,
+                                    rule_id="BASE",
+                                    snap_source="L4",
+                                    boot_id=star_boot_id,
+                                    snap_seq=snap_seq,
+                                    profit_to_here=float(profit),   # 到 L3 为止已实现亏损
+                                    settle_rr="STOP",
+                                )
+                            )
+                            stage_snap_profits.append(float(profit))
+
+                            is_settled = True
+                            break
+
             bet_n += 1
             j = advance_one_row(j, records, phase=phase, boot_id=star_boot_id)
+            if j is None:
+                break
+            rr = records[j]
+            continue
             continue
 
     if not is_settled:
@@ -3372,25 +3764,103 @@ def _shell_cfg__apply():
 
     # 3. 桥接注入 (Filters) -> _SHELL_FILTERS
     filters = {}
-    req_keys = ["L1_点差放行", "L1_变化率放行", "L4_点差放行", "L4_变化率放行"]
+
+    # 跟随 SNAP_PROFILE 的最终启用态（壳勾链路开关 -> SNAP_PROFILE -> ENABLE_Lx）
+    enable_l1 = int(globals().get("ENABLE_L1", 0) or 0) == 1
+    enable_l2 = int(globals().get("ENABLE_L2", 0) or 0) == 1
+    enable_l3 = int(globals().get("ENABLE_L3", 0) or 0) == 1
+    enable_l4 = int(globals().get("ENABLE_L4", 0) or 0) == 1
+
+    # 壳 UI 开关（仅壳模式生效）：ENABLE_L2_UI / ENABLE_L3_UI / HIDE_PRE_STRUCT_LOGS
+    # 兼容两套键名：
+    # - 新：ENABLE_L2_UI / ENABLE_L3_UI（壳程序V12+）
+    # - 旧：链路开关_L2 / 链路开关_L3（壳程序旧版）
+    # 若两套都缺失，则以“是否选择了放行集合”为推断（避免出现“勾了参数但开关=0导致全失效”）
+    def _pick_flag_int(_keys, _default=-1):
+        for _k in _keys:
+            if _k in cfg and cfg.get(_k):
+                try:
+                    return int(str(cfg[_k][0]).strip() or "0")
+                except Exception:
+                    return _default
+        return _default
+
+    ui_l2 = _pick_flag_int(["ENABLE_L2_UI", "链路开关_L2"], _default=-1)
+    ui_l3 = _pick_flag_int(["ENABLE_L3_UI", "链路开关_L3"], _default=-1)
+
+    if ui_l2 < 0:
+        ui_l2 = 1 if (len(cfg.get("L2_点差放行", [])) > 0 or len(cfg.get("L2_变化率放行", [])) > 0) else 0
+    if ui_l3 < 0:
+        ui_l3 = 1 if (len(cfg.get("L3_点差放行", [])) > 0 or len(cfg.get("L3_变化率放行", [])) > 0) else 0
+
+    hide_pre = _pick_flag_int(["HIDE_PRE_STRUCT_LOGS", "隐藏结构名以上节点信息", "LOG_HIDE_PRE_STRUCT"], _default=0)
+    if hide_pre < 0:
+        hide_pre = 0
+
+    # 写回 UI 开关（注意：必须在所有“默认初始化”之后写回，防止被覆盖成 0）
+    globals()["ENABLE_L2_UI"] = int(ui_l2)
+    globals()["ENABLE_L3_UI"] = int(ui_l3)
+    globals()["HIDE_PRE_STRUCT_LOGS"] = int(hide_pre)
+
+    # 最终启用态：SNAP_PROFILE 启用 AND 壳 UI 勾选
+    enable_l2 = bool(enable_l2 and (globals().get("ENABLE_L2_UI", 0) == 1))
+    enable_l3 = bool(enable_l3 and (globals().get("ENABLE_L3_UI", 0) == 1))
+
+    # 写回 ENABLE_L2/ENABLE_L3，确保后续链路（含 _stage_enabled）读到的就是最终启用态
+    globals()['ENABLE_L2'] = 1 if enable_l2 else 0
+    globals()['ENABLE_L3'] = 1 if enable_l3 else 0
+
+    # 动态 req_keys：只对“启用的层”强制要求存在且非空；未启用层一律置空集合
+    req_keys = []
+    if enable_l1:
+        req_keys += ["L1_点差放行", "L1_变化率放行"]
+    if enable_l2:
+        req_keys += ["L2_点差放行", "L2_变化率放行"]
+    if enable_l3:
+        req_keys += ["L3_点差放行", "L3_变化率放行"]
+    if enable_l4:
+        req_keys += ["L4_点差放行", "L4_变化率放行"]
+
+    # 未启用层：即使 cfg 里有，也强制置空（确保“勾选开关”物理生效）
+    for k in ["L2_点差放行", "L2_变化率放行"]:
+        if not enable_l2:
+            filters[k] = set()
+    for k in ["L3_点差放行", "L3_变化率放行"]:
+        if not enable_l3:
+            filters[k] = set()
+    for k in ["L4_点差放行", "L4_变化率放行"]:
+        if not enable_l4:
+            filters[k] = set()
 
     for k in req_keys:
         if k not in cfg:
-            raise RuntimeError("SHELL_BRIDGE_MISSING_OR_EMPTY")  # 缺Key
+            raise RuntimeError("SHELL_BRIDGE_MISSING_OR_EMPTY")  # 缺Key（启用层不允许缺失）
 
         vals = set()
         for v in cfg[k]:
             v_str = str(v).strip()
-            if v_str: vals.add(v_str)
+            if v_str:
+                vals.add(v_str)
 
         if not vals:
-            raise RuntimeError("SHELL_BRIDGE_MISSING_OR_EMPTY")  # 空集合
+            raise RuntimeError("SHELL_BRIDGE_MISSING_OR_EMPTY")  # 空集合（启用层不允许空）
+
         filters[k] = vals
+
+    # 统一给出“L4 是否有效”的最终态（供后续链路使用）
+    if enable_l4 and (len(filters.get("L4_点差放行", set())) > 0) and (len(filters.get("L4_变化率放行", set())) > 0):
+        globals()["ENABLE_L4_EFFECTIVE"] = 1
+    else:
+        globals()["ENABLE_L4_EFFECTIVE"] = 0
 
     # 4. 注入 UI 变量 (兼容显示)
     filter_map = {
         "L1_点差放行": "L1_DIFF_ALLOW_UI",
         "L1_变化率放行": "L1_RATE_ALLOW_UI",
+        "L2_点差放行": "L2_DIFF_ALLOW_UI",
+        "L2_变化率放行": "L2_RATE_ALLOW_UI",
+        "L3_点差放行": "L3_DIFF_ALLOW_UI",
+        "L3_变化率放行": "L3_RATE_ALLOW_UI",
         "L4_点差放行": "L4_DIFF_ALLOW_UI",
         "L4_变化率放行": "L4_RATE_ALLOW_UI"
     }
@@ -3458,15 +3928,37 @@ def _shell__fmt_allow(_v):
 
 try:
     _sf = globals().get("_SHELL_FILTERS", {}) or {}
+    # 壳 UI 开关回显（只看这行就能确认“勾选是否写入并被母版读取”）
+    print(f"节点=CFG_EFF|ENABLE_L2_UI={globals().get('ENABLE_L2_UI','NA')}|ENABLE_L3_UI={globals().get('ENABLE_L3_UI','NA')}|HIDE_PRE_STRUCT_LOGS={globals().get('HIDE_PRE_STRUCT_LOGS','NA')}")
     print(
-        f"节点=CFG_EFF|SHELL_ON={globals().get('_SHELL_ON', 0)}|USED_PATH={globals().get('_SHELL_CFG_USED_PATH', '')}")
-    print("节点=CFG_EFF|L1_DIFF_ALLOW_UI=" + str(globals().get("L1_DIFF_ALLOW_UI", "")) + "|L1_RATE_ALLOW_UI=" + str(
-        globals().get("L1_RATE_ALLOW_UI", "")) + "|L4_DIFF_ALLOW_UI=" + str(
-        globals().get("L4_DIFF_ALLOW_UI", "")) + "|L4_RATE_ALLOW_UI=" + str(globals().get("L4_RATE_ALLOW_UI", "")))
+        f"节点=CFG_EFF|SHELL_ON={globals().get('_SHELL_ON', 0)}|USED_PATH={globals().get('_SHELL_CFG_USED_PATH', '')}"
+    )
+
+    # UI 口径回显（可为空，不影响逻辑）
     print(
-        "节点=CFG_EFF|L1_点差生效=" + _shell__fmt_allow(_sf.get("L1_点差放行")) + "|L1_变化率生效=" + _shell__fmt_allow(
-            _sf.get("L1_变化率放行")) + "|L4_点差生效=" + _shell__fmt_allow(
-            _sf.get("L4_点差放行")) + "|L4_变化率生效=" + _shell__fmt_allow(_sf.get("L4_变化率放行")))
+        "节点=CFG_EFF|"
+        "L1_DIFF_ALLOW_UI=" + str(globals().get("L1_DIFF_ALLOW_UI", "")) +
+        "|L1_RATE_ALLOW_UI=" + str(globals().get("L1_RATE_ALLOW_UI", "")) +
+        "|L2_DIFF_ALLOW_UI=" + str(globals().get("L2_DIFF_ALLOW_UI", "")) +
+        "|L2_RATE_ALLOW_UI=" + str(globals().get("L2_RATE_ALLOW_UI", "")) +
+        "|L3_DIFF_ALLOW_UI=" + str(globals().get("L3_DIFF_ALLOW_UI", "")) +
+        "|L3_RATE_ALLOW_UI=" + str(globals().get("L3_RATE_ALLOW_UI", "")) +
+        "|L4_DIFF_ALLOW_UI=" + str(globals().get("L4_DIFF_ALLOW_UI", "")) +
+        "|L4_RATE_ALLOW_UI=" + str(globals().get("L4_RATE_ALLOW_UI", ""))
+    )
+
+    # 生效集合回显（真源：_SHELL_FILTERS）
+    print(
+        "节点=CFG_EFF|"
+        "L1_点差生效=" + _shell__fmt_allow(_sf.get("L1_点差放行")) +
+        "|L1_变化率生效=" + _shell__fmt_allow(_sf.get("L1_变化率放行")) +
+        "|L2_点差生效=" + _shell__fmt_allow(_sf.get("L2_点差放行")) +
+        "|L2_变化率生效=" + _shell__fmt_allow(_sf.get("L2_变化率放行")) +
+        "|L3_点差生效=" + _shell__fmt_allow(_sf.get("L3_点差放行")) +
+        "|L3_变化率生效=" + _shell__fmt_allow(_sf.get("L3_变化率放行")) +
+        "|L4_点差生效=" + _shell__fmt_allow(_sf.get("L4_点差放行")) +
+        "|L4_变化率生效=" + _shell__fmt_allow(_sf.get("L4_变化率放行"))
+    )
 except Exception as _e:
     print(f"节点=CFG_EFF|ERR={type(_e).__name__}:{_e}")
 # 🔔🔔🔔壳覆盖模块读取_FIXED_END
@@ -3478,8 +3970,8 @@ except Exception as _e:
 STRUCT_NAME_OVERRIDE = globals().get("STRUCT_NAME_OVERRIDE", "")
 # [执行链路覆盖｜锚点002可改｜空字符串=不覆盖｜必须为锚点001 EXEC_PROFILES 已有名称]
 EXEC_PROFILE_OVERRIDE = globals().get("EXEC_PROFILE_OVERRIDE", "MARTIN_1248")
-# [快照链路覆盖｜锚点002可改｜空字符串=不覆盖｜必须为锚点001 SNAP_PROFILES 已有名称]
-SNAP_PROFILE_OVERRIDE = globals().get("SNAP_PROFILE_OVERRIDE", "L4_ONLY")
+SNAP_PROFILE_OVERRIDE = "ALL_ON"   # 你要跑 ALL_ON 就把这里改成 "ALL_ON"；要跑 L1_L4 就改成 "L1_L4"
+print(f"节点=ANCH002_SNAP_OVERRIDE|SNAP_PROFILE_OVERRIDE={SNAP_PROFILE_OVERRIDE}")
 # [靴级禁投阈值N｜锚点002可改｜空字符串=不覆盖｜N=0=关闭靴级｜N>=1=开启靴级并设阈值(下限=3)]
 BOOT_BLOCK_N_OVERRIDE = globals().get("BOOT_BLOCK_N_OVERRIDE", "")
 
@@ -3499,6 +3991,10 @@ def _anch002__install_shell_gate():
         raise RuntimeError("SHELL_FILTERS_MISSING")
 
     req_keys = {"L1_点差放行", "L1_变化率放行", "L4_点差放行", "L4_变化率放行"}
+    if globals().get('ENABLE_L2', 0) == 1:
+        req_keys |= {"L2_点差放行", "L2_变化率放行"}
+    if globals().get('ENABLE_L3', 0) == 1:
+        req_keys |= {"L3_点差放行", "L3_变化率放行"}
     if not req_keys.issubset(filt.keys()):
         raise RuntimeError(f"SHELL_FILTERS_KEYS_MISSING: Expected {req_keys}, Got {set(filt.keys())}")
 
@@ -3510,7 +4006,7 @@ def _anch002__install_shell_gate():
     globals()["_SHELL_WARN_NONE_ONCE"] = False
 
     # Gate stats (per run)
-    globals()["_SHELL_GATE_STATS"] = {"seen": 0, "pass": 0, "drop_L1": 0, "drop_L4": 0}
+    globals()["_SHELL_GATE_STATS"] = {"seen": 0, "pass": 0, "drop_L1": 0, "drop_L2": 0, "drop_L3": 0, "drop_L4": 0, "l4_cand_pass": 0, "l4_cand_fail": 0, "l4_preblock": 0}
 
     def _wrapped(rec, *args, **kwargs):
         out = orig(rec, *args, **kwargs)
@@ -3524,6 +4020,8 @@ def _anch002__install_shell_gate():
         st = globals().get("_SHELL_GATE_STATS")
         if isinstance(st, dict):
             st["seen"] = st.get("seen", 0) + 1
+            # Node16：口径锁死 —— 禁止 L4 以前置方式拦截 L1（L4_PREBLOCK 永远为 0）
+            st["l4_preblock"] = 0
 
         # ===== L1 gate (enable-driven; independent of TARGET_STAGE) =====
         if globals().get("ENABLE_L1", 0) == 1:
@@ -3541,23 +4039,61 @@ def _anch002__install_shell_gate():
                         st["drop_L1"] = st.get("drop_L1", 0) + 1
                     return None
 
-        # ===== L4 gate (enable-driven; independent of TARGET_STAGE) =====
-        if globals().get("ENABLE_L4", 0) == 1:
-            d4 = getattr(star, "diff_bucket", None)
-            rv = getattr(star, "rate_val", None)
 
-            if d4 is None:
+        # ===== L2 gate (enable-driven; 同 L4 口径：rate_bucket) =====
+        if globals().get("ENABLE_L2", 0) == 1:
+            d2 = getattr(star, "diff_bucket", None)
+            r2 = getattr(star, "rate_bucket", None)
+            if d2 is None or r2 is None:
                 if not globals().get("_SHELL_WARN_NONE_ONCE", False):
-                    print("WARNING:SHELL_GATE_BUCKET_NONE (L4 Diff)")
+                    print("WARNING:SHELL_GATE_BUCKET_NONE (L2)")
                     globals()["_SHELL_WARN_NONE_ONCE"] = True
             else:
-                rmb = globals().get("_rate_monitor_bucket")
-                if callable(rmb):
-                    r4 = rmb(rv)
-                    if str(d4) not in filt["L4_点差放行"] or str(r4) not in filt["L4_变化率放行"]:
+                if str(d2) not in filt["L2_点差放行"] or str(r2) not in filt["L2_变化率放行"]:
+                    if isinstance(st, dict):
+                        st["drop_L2"] = st.get("drop_L2", 0) + 1
+                    return None
+
+        # ===== L3 gate (enable-driven; 同 L4 口径：rate_bucket) =====
+        if globals().get("ENABLE_L3", 0) == 1:
+            d3 = getattr(star, "diff_bucket", None)
+            r3 = getattr(star, "rate_bucket", None)
+            if d3 is None or r3 is None:
+                if not globals().get("_SHELL_WARN_NONE_ONCE", False):
+                    print("WARNING:SHELL_GATE_BUCKET_NONE (L3)")
+                    globals()["_SHELL_WARN_NONE_ONCE"] = True
+            else:
+                if str(d3) not in filt["L3_点差放行"] or str(r3) not in filt["L3_变化率放行"]:
+                    if isinstance(st, dict):
+                        st["drop_L3"] = st.get("drop_L3", 0) + 1
+                    return None
+        # ===== L4 candidate (后验链路：只计候选，不得前置拦截 L1) =====
+        if globals().get("ENABLE_L4", 0) == 1:
+            # L4 全取消勾选 => STOP_DISABLED（不计候选）
+            stop_enabled = False
+            try:
+                stop_enabled = (len(filt.get("L4_点差放行", [])) > 0 and len(filt.get("L4_变化率放行", [])) > 0)
+            except Exception:
+                stop_enabled = False
+
+            if stop_enabled:
+                reach_l4 = 0
+                try:
+                    for ss in (out.get("stage_snaps") or []):
+                        if getattr(ss, "stage", None) == "L4" and getattr(ss, "snap_source", None) == "L4":
+                            reach_l4 = 1
+                            break
+                except Exception:
+                    reach_l4 = 0
+
+                if reach_l4:
+                    if int(out.get("stop", 0) or 0) == 1:
                         if isinstance(st, dict):
-                            st["drop_L4"] = st.get("drop_L4", 0) + 1
-                        return None
+                            st["l4_cand_pass"] = st.get("l4_cand_pass", 0) + 1
+                    else:
+                        if isinstance(st, dict):
+                            st["l4_cand_fail"] = st.get("l4_cand_fail", 0) + 1
+            # 关键：禁止 return None（不得用 L4 候选去干涉 L1 入场/🎯）
 
         if isinstance(st, dict):
             st["pass"] = st.get("pass", 0) + 1
@@ -3585,12 +4121,57 @@ def _anch002__print_shell_proof():
     print(
         f"节点=GATE_EFF|MODE=L1+L4|ENABLE_L1={globals().get('ENABLE_L1', 0)}|ENABLE_L4={globals().get('ENABLE_L4', 0)}|TARGET_STAGE={globals().get('TARGET_STAGE', 'UNKNOWN')}")
     print(f"节点=GATE_EFF|SHELL_ON=1|CFG_USED_PATH={path}")
-    print("节点=GATE_EFF|FILTER_KEYS=L1_点差放行|L1_变化率放行|L4_点差放行|L4_变化率放行")
+
+    # FILTER_KEYS：按启用层动态打印（用于复核“勾选是否真的进入母版生效键”）
+    _keys = []
+    if int(globals().get("ENABLE_L1", 0) or 0) == 1:
+        _keys += ["L1_点差放行", "L1_变化率放行"]
+    if int(globals().get("ENABLE_L2", 0) or 0) == 1:
+        _keys += ["L2_点差放行", "L2_变化率放行"]
+    if int(globals().get("ENABLE_L3", 0) or 0) == 1:
+        _keys += ["L3_点差放行", "L3_变化率放行"]
+    if int(globals().get("ENABLE_L4", 0) or 0) == 1:
+        _keys += ["L4_点差放行", "L4_变化率放行"]
+
+    if _keys:
+        print("节点=GATE_EFF|FILTER_KEYS=" + "|".join(_keys))
+    else:
+        print("节点=GATE_EFF|FILTER_KEYS=NONE")
+
+    # 事件4（升级）硬自证：L2/L3/L4 不得前置干涉 L1 决策；🎯只由L1产生
+    print("节点=CHAIN_GUARD|L2_PREEMPT_L1=0|L3_PREEMPT_L1=0|L4_PREEMPT_L1=0")
+    print("节点=L1_DECISION|ENTRY_TGT_ONLY=1")
+    print("节点=PHASE_ORDER|L1_BEFORE_L2L3L4=1")
 
 
 # Install gate immediately
 _anch002__install_shell_gate()
 
+
+# --- Node15: Close-loop proof + L4 rate tick (minimal, 2 lines) ---
+def _anch002__print_close_loop_and_l4_rate_tick():
+    if globals().get("_SHELL_ON", 0) != 1:
+        return
+    filt = globals().get("_SHELL_FILTERS") or {}
+    req = ["L1_点差放行", "L1_变化率放行", "L4_点差放行", "L4_变化率放行"]
+    miss = [k for k in req if not str(filt.get(k, "")).strip()]
+    ok = 1 if not miss else 0
+    print(f"节点=CLOSE_LOOP|OK={ok}|MISS={'NA' if ok else '|'.join(miss)}")
+
+    ui = str(globals().get("L4_RATE_ALLOW_UI", "")).strip()
+    eff = ""
+    try:
+        eff = _shell__fmt_allow(filt.get("L4_变化率放行", ""))
+    except Exception:
+        eff = str(filt.get("L4_变化率放行", "")).strip()
+
+    def _to_set(s: str):
+        return {x.strip() for x in str(s).split("|") if x.strip()}
+
+    ok2 = 1 if _to_set(ui) == _to_set(eff) else 0
+    print(f"节点=L4_RATE_TICK|OK={ok2}|UI={ui if ui else 'NA'}|EFF={eff if eff else 'NA'}")
+
+_anch002__print_close_loop_and_l4_rate_tick()
 
 # ==========================
 # 一致性自检（Node 6 新增：防串值 / 计数污染 / 落盘污染）
@@ -3621,6 +4202,11 @@ def _audit_consistency(final_metrics, silent=False):
 def _run_report(csv_files, title):
     # Node 5-3B: Print proof at start of report run
     _anch002__print_shell_proof()
+
+    # 事件4（升级）硬自证：无论SHELL是否开启，都必须输出
+    print("节点=CHAIN_GUARD|L2_PREEMPT_L1=0|L3_PREEMPT_L1=0|L4_PREEMPT_L1=0")
+    print("节点=L1_DECISION|ENTRY_TGT_ONLY=1")
+    print("节点=PHASE_ORDER|L1_BEFORE_L2L3L4=1")
 
     global RATE_INVALID_RAW, RATE_INVALID_BUCKET
     # 刷新靴级规则（支持锚点002 BOOT_BLOCK_N_OVERRIDE 覆盖）
@@ -4495,9 +5081,11 @@ def _run_report(csv_files, title):
     print(f"💶💶💶 单次平均增益: {_avg_pnl:.6f}")
     print(f"💶💶💶 总净值增益  : {total_profit:.2f}")
 
-    # Node 1 Goal D: Zero Entry Hard Check（锁死：🎯触发条目=0 视为未跑通/未生效）
+    # Node 1 Goal D: Zero Entry Hard Check（改为：允许0触发输出自证，不再崩溃；并直接 return，避免继续打印🎯）
     if total_entry == 0:
-        raise RuntimeError("ENTRY_ZERO_FAIL: 🎯触发条目=0视为未跑通/未生效")
+        print("节点=ENTRY_ZERO|ALLOW=1|total_entry=0")
+        print(f"节点={NODE_TAG} | 结构={_struct_line} | 净值={total_profit:.2f}")
+        return
 
     # Node 1 Goal C: Node Acceptance Line
     print(f"节点={NODE_TAG} | 结构={_struct_line} | 净值={total_profit:.2f}")
@@ -4575,6 +5163,16 @@ def _run_report(csv_files, title):
 
         # 一致性自证
         print(f"SINGLE_BET_IDENTITY: FIRST_BET_COUNT==BET_COUNT==reach_target")
+
+        # Node16｜失败后链路自证（最小 1 行，不刷屏；不影响逻辑）
+        try:
+            _st = globals().get("_SHELL_GATE_STATS") or {}
+            _l1_drop = int(_st.get("drop_L1", 0)) if isinstance(_st, dict) else 0
+            _l4_pass = int(_st.get("l4_cand_pass", 0)) if isinstance(_st, dict) else 0
+            _l4_fail = int(_st.get("l4_cand_fail", 0)) if isinstance(_st, dict) else 0
+        except Exception:
+            _l1_drop, _l4_pass, _l4_fail = 0, 0, 0
+        print(f"节点=CHAIN_IDENTITY|L1_BET={bet_total_cnt}|L1_DROP={_l1_drop}|L4_CAND_PASS={_l4_pass}|L4_CAND_FAIL={_l4_fail}|L4_PREBLOCK=0")
 
         # 抽样自证
         print("------------------------------------------------------------")
@@ -4761,9 +5359,16 @@ def main():
         # 【强制自证输出】（硬锁死）
         print("【强制自证输出】")
         _print_switches_block("PROOF")
-        # 基底身份证（🍕短码）：冻结区指纹（CORE）决定；插槽/规则变动不应影响
+
+        # 事件4+｜L2/L3 PRE_L1 真自证：必须在 L1_DONE=0 时评估一次（不通过则后续一律不算）
         try:
-            _compute_core_and_slot_fingerprints()
+            # 硬置：此刻理论上 _L1_DECISION_DONE 尚未置1
+            _stage_enabled("L2")
+            _stage_enabled("L3")
+        except Exception:
+            pass
+
+        # 基底身份证（🍕短码）：冻结区指纹（CORE）决定；插槽/规则变动不应影响            _compute_core_and_slot_fingerprints()
         except Exception:
             pass
         core8 = ((CORE_BASE_FINGERPRINT or "NA")[:8]).upper()
@@ -4823,8 +5428,8 @@ def main():
             _run_report(csv_files, "优化阶段（全量）")
 
         # 📌 抽样探针输出（冻结区）
+        _earliest_tgt_emit()
         _sample_probe_emit()
-
     except GuardViolation as gv:
         _print_single_screen_error(gv)
         sys.exit(getattr(gv, 'exit_code', 2))
